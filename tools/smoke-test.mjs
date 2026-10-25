@@ -413,8 +413,10 @@ if (html) {
   const missing = refs.filter((u) => !fs.existsSync(path.join(ROOT, u)));
   check('все ссылки страницы ведут на существующие файлы', missing.length === 0, missing.join(', '));
   check('страница ссылается на иконки и скрипт', refs.length >= 4, 'ссылок: ' + refs.length);
-  const ogImage = html.match(/<meta property="og:image" content="([^"]+)"/)?.[1];
-  check('og:image указывает на существующий файл', !!ogImage && fs.existsSync(path.join(ROOT, ogImage)), String(ogImage));
+  const ogImage = html.match(/<meta property="og:image" content="([^"]+)"/)?.[1] || '';
+  const ogLocal = ogImage.replace(/^https:\/\/gagalinna\.github\.io\/zhizn-v-lesu\//, '');
+  check('og:image — абсолютный адрес', /^https:\/\//.test(ogImage), ogImage);
+  check('og:image указывает на существующий файл', !!ogLocal && fs.existsSync(path.join(ROOT, ogLocal)), ogImage);
   check('есть описание для поисковиков', /<meta name="description" content="[^"]{40,}"/.test(html));
 
   // страховка: если game.js не загрузился, вместо пустого экрана — сообщение
