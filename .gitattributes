@@ -1,0 +1,8 @@
+# Текстовые файлы — LF, картинки и видео — как есть.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.mp4 binary
