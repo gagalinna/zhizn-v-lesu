@@ -46,11 +46,15 @@ function makeCtx() {
     shadowOffsetY: 0,
     imageSmoothingEnabled: true,
   };
-  const calls = { total: 0, frames: 0, unknown: new Set() };
+  const calls = { total: 0, frames: 0, unknown: new Set(), texts: [] };
   const gradient = () => ({ addColorStop() {} });
 
   const impl = {
     measureText: (t) => ({ width: String(t).length * 7 }),
+    fillText: (t) => {
+      calls.texts.push(String(t));
+      calls.total++;
+    },
     createLinearGradient: gradient,
     createRadialGradient: gradient,
     createConicGradient: gradient,
@@ -92,7 +96,7 @@ function makeCtx() {
 
 /* --------------------------- песочница браузера ---------------------------- */
 
-function makeSandbox({ storage: sharedStorage } = {}) {
+function makeSandbox({ storage: sharedStorage, touch = false, width = 1440, height = 900 } = {}) {
   const clock = { t: 1000 };
   const rafQueue = [];
   const listeners = { window: new Map(), canvas: new Map() };
@@ -110,10 +114,10 @@ function makeSandbox({ storage: sharedStorage } = {}) {
     getBoundingClientRect: () => ({
       left: 0,
       top: 0,
-      right: VIEW_W,
-      bottom: VIEW_H,
-      width: VIEW_W,
-      height: VIEW_H,
+      right: canvas.width,
+      bottom: canvas.height,
+      width: canvas.width,
+      height: canvas.height,
       x: 0,
       y: 0,
     }),
@@ -135,9 +139,9 @@ function makeSandbox({ storage: sharedStorage } = {}) {
   }
 
   const windowObj = {
-    innerWidth: 1440,
-    innerHeight: 900,
-    devicePixelRatio: 1,
+    innerWidth: width,
+    innerHeight: height,
+    devicePixelRatio: touch ? 2 : 1,
     addEventListener: (type, fn) => {
       if (!listeners.window.has(type)) listeners.window.set(type, []);
       listeners.window.get(type).push(fn);
@@ -149,7 +153,11 @@ function makeSandbox({ storage: sharedStorage } = {}) {
       removeItem: (k) => storage.delete(k),
       clear: () => storage.clear(),
     },
-    matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+    matchMedia: (query) => ({
+      matches: touch && /coarse/.test(String(query)),
+      addEventListener() {},
+      removeEventListener() {},
+    }),
   };
 
   const sandbox = {
@@ -177,7 +185,7 @@ function makeSandbox({ storage: sharedStorage } = {}) {
       debug: () => {},
     },
     localStorage: windowObj.localStorage,
-    navigator: { userAgent: 'smoke-test', language: 'ru-RU' },
+    navigator: { userAgent: 'smoke-test', language: 'ru-RU', maxTouchPoints: touch ? 5 : 0 },
     addEventListener: windowObj.addEventListener,
     setTimeout: (fn) => fn(),
     clearTimeout: () => {},
@@ -197,6 +205,15 @@ function makeSandbox({ storage: sharedStorage } = {}) {
   function click(x, y) {
     for (const fn of listeners.canvas.get('mousemove') || []) fn({ clientX: x, clientY: y });
     for (const fn of listeners.canvas.get('click') || []) fn({ clientX: x, clientY: y });
+  }
+  function touch(type, points) {
+    const changedTouches = points.map((p) => ({
+      identifier: p.id ?? 1,
+      clientX: p.x,
+      clientY: p.y,
+    }));
+    const event = { preventDefault() {}, stopPropagation() {}, changedTouches, touches: changedTouches };
+    for (const fn of listeners.canvas.get(type) || []) fn(event);
   }
   /** Прокрутить n кадров по 16.67 мс. */
   function frames(n) {
@@ -218,7 +235,7 @@ function makeSandbox({ storage: sharedStorage } = {}) {
     }
   }
 
-  return { sandbox, context, run, key, click, frames, tryFrames, storage, logs, calls, clock, elements };
+  return { sandbox, context, run, key, click, touch, frames, tryFrames, storage, logs, calls, clock, elements };
 }
 
 /* --------------------------------- загрузка -------------------------------- */
@@ -263,10 +280,24 @@ const state = () => {
   }
 };
 
-/* ---------------------------- экран выбора -------------------------------- */
+/* ------------------------- инструкция при запуске -------------------------- */
 
-check('стартовый экран — выбор персонажа', state() === 'select', String(state()));
-g.tryFrames(20, 'выбор персонажа');
+check('стартовый экран — краткая инструкция', state() === 'intro', String(state()));
+g.tryFrames(20, 'инструкция');
+const introText = g.calls.texts.join(' | ');
+check('инструкция объясняет цель', /ТВОЯ ЦЕЛЬ/.test(introText));
+check('инструкция объясняет, что делать', /ЧТО ДЕЛАТЬ/.test(introText));
+check('инструкция показывает управление', /УПРАВЛЕНИЕ/.test(introText));
+check('в инструкции есть кнопка «Дальше»', /ДАЛЬШЕ/.test(introText));
+check('инструкция подстраивается под телефон', /ТЕЛЕФОН|КЛАВИАТУРА/.test(introText));
+
+const introBtnX = g.run('INTRO_BTN.x + INTRO_BTN.w / 2');
+const introBtnY = g.run('INTRO_BTN.y + INTRO_BTN.h / 2');
+g.click(introBtnX, introBtnY);
+g.tryFrames(3, 'переход к выбору героя');
+check('кнопка «Дальше» ведёт к выбору героя', state() === 'select', String(state()));
+
+/* ---------------------------- экран выбора -------------------------------- */
 
 const cardX = g.run('cardRect(2).x + cardRect(2).w / 2');
 const cardY = g.run('cardRect(2).y + 100');
@@ -309,6 +340,31 @@ g.key('KeyC', false);
 g.key('Escape');
 g.tryFrames(5, 'закрытие крафта');
 check('крафт закрывается по Esc', g.run('craftOpen') === false);
+
+// Инструкция и меню паузы доступны прямо из игры.
+g.calls.texts.length = 0;
+g.key('KeyH');
+g.key('KeyH', false);
+g.tryFrames(3, 'инструкция из игры');
+check('H открывает инструкцию', g.run('helpOpen') === true);
+const helpText = g.calls.texts.join(' | ');
+check('в инструкции из игры есть цель и управление', /ТВОЯ ЦЕЛЬ/.test(helpText) && /УПРАВЛЕНИЕ/.test(helpText));
+g.key('Escape');
+g.tryFrames(2, 'закрытие инструкции');
+check('Esc закрывает инструкцию', g.run('helpOpen') === false);
+
+g.key('Escape');
+g.tryFrames(3, 'меню паузы');
+check('Esc открывает меню паузы', g.run('menuOpen') === true);
+g.key('Escape');
+g.tryFrames(2, 'закрытие меню');
+check('Esc закрывает меню паузы', g.run('menuOpen') === false);
+
+g.run('shopOpen = true; shopSel = 0');
+g.tryFrames(3, 'лавка одежды');
+check('лавка открывается и рисуется', g.run('shopOpen') === true);
+g.run('shopOpen = false; mouse.clicked = false');
+
 for (const d of ['Digit1', 'Digit2', 'Digit3']) g.key(d);
 
 // ~40 секунд игры: день сменяется, ночь с волками, готовка, голод
@@ -391,6 +447,120 @@ try {
   check('сценарий перезагрузки', false, err.message);
 }
 
+/* ------------------------------ телефон ---------------------------------- */
+
+try {
+  g.run('startGame(); setInputMode("touch")');
+  g.tryFrames(2, 'сенсорный режим');
+  check('сенсорный режим включается', g.run('uiMode') === 'touch', String(g.run('uiMode')));
+
+  const touchX0 = g.run('player.x');
+  g.touch('touchstart', [{ id: 1, x: 120, y: 470 }]);
+  g.touch('touchmove', [{ id: 1, x: 190, y: 470 }]);
+  g.tryFrames(45, 'ходьба джойстиком');
+  g.touch('touchend', [{ id: 1, x: 190, y: 470 }]);
+  const touchDx = g.run('player.x') - touchX0;
+  check('джойстик двигает героя', touchDx > 1, 'dx=' + touchDx.toFixed(1));
+  check('после отпускания джойстик выключен', g.run('touchJoy.active') === false);
+
+  g.calls.texts.length = 0;
+  g.tryFrames(2, 'экранные кнопки');
+  const touchText = g.calls.texts.join(' | ');
+  check('на телефоне видны кнопки управления', /ОГОНЬ/.test(touchText) && /ДЕЙСТВИЕ/.test(touchText) && /КРАФТ/.test(touchText));
+
+  g.run("addItem('bow'); addItem('arrow', 5); shootTimer = 0");
+  const arrowsBefore = g.run("invCount('arrow')");
+  g.touch('touchstart', [{ id: 2, x: 884, y: 528 }]);
+  g.tryFrames(2, 'выстрел кнопкой');
+  g.touch('touchend', [{ id: 2, x: 884, y: 528 }]);
+  const arrowsAfter = g.run("invCount('arrow')");
+  check('кнопка «ОГОНЬ» стреляет', arrowsAfter < arrowsBefore, `${arrowsBefore} → ${arrowsAfter}`);
+
+  g.touch('touchstart', [{ id: 3, x: 928, y: 96 }]);
+  g.touch('touchend', [{ id: 3, x: 928, y: 96 }]);
+  g.tryFrames(2, 'меню телефона');
+  check('кнопка «?» открывает меню', g.run('menuOpen') === true);
+  g.run('closeMenu()');
+  g.tryFrames(1, 'закрытие меню телефона');
+} catch (err) {
+  check('сценарий телефона', false, err.message);
+}
+
+/* ------------------------------- геймпад ---------------------------------- */
+
+try {
+  g.run('startGame()');
+  const fakePad = {
+    connected: true,
+    index: 0,
+    id: 'Smoke Test Pad',
+    mapping: 'standard',
+    axes: [0, 0, 0, 0],
+    buttons: Array.from({ length: 16 }, () => ({ pressed: false, value: 0 })),
+  };
+  g.sandbox.navigator.getGamepads = () => [fakePad];
+  g.tryFrames(2, 'подключение геймпада');
+  check('геймпад находится', g.run('pad.connected') === true);
+  check('интерфейс переключается на геймпад', g.run('uiMode') === 'gamepad', String(g.run('uiMode')));
+
+  const padX0 = g.run('player.x');
+  fakePad.axes[0] = 1;
+  g.tryFrames(30, 'ходьба геймпадом');
+  fakePad.axes[0] = 0;
+  const padDx = g.run('player.x') - padX0;
+  check('стик геймпада двигает героя', padDx > 1, 'dx=' + padDx.toFixed(1));
+
+  g.run("addItem('bow'); addItem('arrow', 5); shootTimer = 0");
+  const padArrowsBefore = g.run("invCount('arrow')");
+  fakePad.buttons[2].pressed = true;
+  g.tryFrames(3, 'выстрел геймпадом');
+  fakePad.buttons[2].pressed = false;
+  g.tryFrames(1, 'отпускание кнопки');
+  const padArrowsAfter = g.run("invCount('arrow')");
+  check('X на геймпаде стреляет', padArrowsAfter < padArrowsBefore, `${padArrowsBefore} → ${padArrowsAfter}`);
+
+  g.sandbox.navigator.getGamepads = () => [];
+  g.tryFrames(2, 'отключение геймпада');
+  check('геймпад отключается без ошибок', g.run('pad.connected') === false);
+} catch (err) {
+  check('сценарий геймпада', false, err.message);
+}
+
+/* -------------------- широкий экран телефона ------------------------------ */
+
+try {
+  const phone = makeSandbox({ touch: true, width: 844, height: 390 });
+  vm.runInContext(code, phone.context, { filename: 'game.js (телефон)', timeout: 20000 });
+  check('телефон определяется как сенсорный', phone.run('IS_TOUCH') === true);
+  check(
+    'на широком телефоне холст расширяется',
+    phone.run('VIEW_W') > 960 && phone.run('VIEW_W') <= 1200,
+    'VIEW_W=' + phone.run('VIEW_W')
+  );
+  check('сенсорные кнопки прижаты к правому краю', phone.run('TOUCH_BUTTONS[0].x') === phone.run('VIEW_W - 76'));
+  phone.tryFrames(3, 'инструкция на телефоне');
+  check('на телефоне инструкция показывает управление', phone.run('uiMode') === 'touch');
+  phone.run("goToSelect(); startGame(); addItem('bow'); addItem('arrow', 3)");
+  phone.tryFrames(2, 'лес на телефоне');
+  check('на телефоне рисуется широкий кадр', phone.run('VIEW_W') === 1200);
+
+  const phoneX0 = phone.run('player.x');
+  phone.touch('touchstart', [{ id: 1, x: 120, y: 470 }]);
+  phone.touch('touchmove', [{ id: 1, x: 170, y: 470 }]);
+  phone.tryFrames(30, 'джойстик на широком холсте');
+  phone.touch('touchend', [{ id: 1, x: 170, y: 470 }]);
+  check('джойстик работает на широком холсте', phone.run('player.x') - phoneX0 > 1);
+
+  const phoneArrows = phone.run("invCount('arrow')");
+  const shootX = phone.run('VIEW_W - 76');
+  phone.touch('touchstart', [{ id: 2, x: shootX, y: 528 }]);
+  phone.tryFrames(1, 'выстрел на широком холсте');
+  phone.touch('touchend', [{ id: 2, x: shootX, y: 528 }]);
+  check('кнопка «ОГОНЬ» на широком холсте стреляет', phone.run("invCount('arrow')") < phoneArrows);
+} catch (err) {
+  check('сценарий широкого телефона', false, err.message);
+}
+
 /* --------------------------- страница index.html -------------------------- */
 
 let html = '';
@@ -406,6 +576,9 @@ if (html) {
   check('язык страницы — русский', /<html lang="ru">/i.test(html));
   check('страница подключает game.js', /<script[^>]+src="game\.js"/.test(html));
   check('есть холст 960×600', /<canvas[^>]+width="960"[^>]+height="600"/.test(html));
+  check('на телефоне есть подсказка «поверни горизонтально»', /id="rotate-hint"/.test(html));
+  check('старая подсказка «на телефоне нельзя» убрана', !/На телефоне пройти не получится/.test(html));
+  check('viewport разрешает полноэкранную игру', /viewport-fit=cover/.test(html) && /maximum-scale=1/.test(html));
 
   const refs = [...html.matchAll(/(?:src|href)="([^"#]+)"/g)]
     .map((m) => m[1])

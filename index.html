@@ -2,9 +2,10 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="format-detection" content="telephone=no">
 <title>Жизнь в лесу — пиксельное выживание</title>
-<meta name="description" content="Пиксельная игра о выживании в лесу: собери ресурсы, скрафти лук, переживи ночь, победи Бабу-ягу и Лешего и выберись в город Зелёный Бор. Игра по идее Алисы.">
+<meta name="description" content="Пиксельная игра о выживании в лесу: собери ресурсы, скрафти лук, переживи ночь, победи Бабу-ягу и Лешего и выберись в город Зелёный Бор. Играется на компьютере, телефоне и с геймпада. Идея Алисы.">
 <meta name="author" content="Алиса">
 <meta name="theme-color" content="#14211a">
 <meta name="color-scheme" content="dark">
@@ -17,14 +18,14 @@
 <meta property="og:locale" content="ru_RU">
 <meta property="og:site_name" content="Жизнь в лесу">
 <meta property="og:title" content="Жизнь в лесу — пиксельное выживание">
-<meta property="og:description" content="Собери лук, переживи ночь, победи Бабу-ягу и Лешего и выберись из леса. Игра по идее Алисы.">
+<meta property="og:description" content="Собери лук, переживи ночь, победи Бабу-ягу и Лешего и выберись из леса. Компьютер, телефон, геймпад. Игра по идее Алисы.">
 <meta property="og:image" content="https://gagalinna.github.io/zhizn-v-lesu/assets/og-cover.jpg">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="Обложка игры «Жизнь в лесу»">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Жизнь в лесу — пиксельное выживание">
-<meta name="twitter:description" content="Собери лук, переживи ночь, победи Бабу-ягу и Лешего и выберись из леса. Игра по идее Алисы.">
+<meta name="twitter:description" content="Собери лук, переживи ночь, победи Бабу-ягу и Лешего и выберись из леса. Компьютер, телефон, геймпад. Игра по идее Алисы.">
 <meta name="twitter:image" content="https://gagalinna.github.io/zhizn-v-lesu/assets/og-cover.jpg">
 <link rel="canonical" href="https://gagalinna.github.io/zhizn-v-lesu/">
 
@@ -51,11 +52,12 @@
     -webkit-user-select: none;
   }
   #wrap {
-    width: 100%;
-    height: 100%;
+    position: fixed;
+    inset: 0;
     display: flex;
     align-items: center;
     justify-content: center;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
   }
   canvas {
     display: block;
@@ -79,30 +81,52 @@
     white-space: nowrap;
     border: 0;
   }
-  /* Подсказка для телефонов: играть нужно с клавиатурой. */
-  #touch-hint {
+  /* На телефоне в вертикальном положении играть неудобно: просим повернуть. */
+  #rotate-hint {
     display: none;
     position: fixed;
-    left: 12px;
-    right: 12px;
-    bottom: 12px;
-    margin: 0;
-    padding: 10px 14px;
-    font-size: 13px;
-    line-height: 1.45;
+    inset: 0;
+    z-index: 50;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding: 28px;
     text-align: center;
     color: #dfe9df;
-    background: rgba(10, 20, 14, 0.92);
-    border: 2px solid #3b5f43;
-    border-radius: 10px;
+    background: rgba(10, 20, 14, 0.97);
   }
-  @media (hover: none) and (pointer: coarse) {
-    #touch-hint { display: block; }
+  #rotate-hint p {
+    margin: 0;
+    max-width: 26em;
+    font-size: 18px;
+    line-height: 1.5;
+  }
+  #rotate-hint small {
+    max-width: 24em;
+    color: #9dbfa4;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  #rotate-hint .phone {
+    width: 54px;
+    height: 84px;
+    border: 3px solid #f4e9c8;
+    border-radius: 10px;
+    animation: turn-phone 1.8s ease-in-out infinite;
+  }
+  @keyframes turn-phone {
+    0%, 25% { transform: rotate(0deg); }
+    60%, 100% { transform: rotate(90deg); }
+  }
+  @media (orientation: portrait) and (any-pointer: coarse) {
+    #rotate-hint { display: flex; }
   }
   /* Сообщение, если игра не загрузилась. */
   #fallback {
     position: fixed;
     inset: 0;
+    z-index: 100;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -117,6 +141,7 @@
   noscript p {
     position: fixed;
     inset: 0;
+    z-index: 100;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -135,16 +160,19 @@
     <canvas id="game" width="960" height="600" role="application" aria-label="Игра «Жизнь в лесу»"></canvas>
   </div>
 
-  <p id="touch-hint">
-    Игра рассчитана на ноутбук: нужна клавиатура (WASD или стрелки).
-    На телефоне пройти не получится.
-  </p>
+  <div id="rotate-hint" role="status" aria-live="polite">
+    <div class="phone" aria-hidden="true"></div>
+    <p>Поверни телефон горизонтально</p>
+    <small>Игра, подсказки и кнопки рассчитаны на горизонтальный экран.
+      Если поворот заблокирован — включи автоповорот.</small>
+  </div>
 
   <div id="fallback" hidden>
     <p>
       <b>Игра не загрузилась.</b><br>
-      Обновите страницу (F5). Если не помогло — проверьте, что файл
-      <code>game.js</code> лежит рядом с <code>index.html</code>.
+      Обновите страницу (F5 или кнопка обновления в браузере). Если не
+      помогло — проверьте, что файл <code>game.js</code> лежит рядом с
+      <code>index.html</code>.
     </p>
   </div>
 

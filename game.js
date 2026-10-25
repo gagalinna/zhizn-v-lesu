@@ -13,6 +13,8 @@
       Прогресс сохраняется в localStorage.
    7) Город Зелёный Бор с жителями и разговорами, возвращение в лес,
       финал первой части и задел на вторую (дорога на восток).
+   8) Игра с телефона (джойстик и кнопки), с геймпада (Gamepad API),
+      краткая инструкция при запуске, пауза и помощь.
    Графика — простые пиксельные заглушки, рисуются прямоугольниками.
    ========================================================================== */
 
@@ -20,6 +22,44 @@
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
+
+// Телефон/планшет определяем по «грубому» указателю. Параметр ?touch=1
+// принудительно включает сенсорное управление — удобно для проверки и для
+// гибридных устройств, где браузер не признаёт экран сенсорным.
+function detectTouch() {
+  try {
+    if (typeof location !== 'undefined' && /[?&]touch=1(?:[&#]|$)/.test(location.search)) return true;
+    if (window.matchMedia) {
+      if (window.matchMedia('(any-pointer: coarse)').matches) return true;
+      if (window.matchMedia('(hover: none) and (pointer: coarse)').matches) return true;
+    }
+    if (
+      'ontouchstart' in window &&
+      typeof navigator !== 'undefined' &&
+      navigator.maxTouchPoints > 0
+    ) {
+      return true;
+    }
+  } catch (e) {
+    /* очень старый браузер — считаем, что это компьютер */
+  }
+  return false;
+}
+const IS_TOUCH = detectTouch();
+
+// На телефоне широкий экран (19:9, 20:9) — растягиваем внутреннюю картинку,
+// чтобы игра занимала весь обзор, а не узкую полоску по центру. Высота всегда
+// 600, ширина растёт до 1200 — так пещеры (1200 пикселей) видны целиком.
+if (IS_TOUCH) {
+  try {
+    const a = Math.max(window.innerWidth, window.innerHeight) / Math.max(1, Math.min(window.innerWidth, window.innerHeight));
+    const wide = Math.round(canvas.height * a);
+    if (wide > canvas.width) canvas.width = Math.min(1200, wide);
+  } catch (e) {
+    /* оставляем 960×600 */
+  }
+}
+
 const VIEW_W = canvas.width;
 const VIEW_H = canvas.height;
 
@@ -1151,6 +1191,7 @@ function advanceDialog() {
   if (action === 'finish') finishGame();
   else if (action === 'shop') {
     shopOpen = true;
+    shopSel = 0;
     mouse.clicked = false;
   } else if (action === 'pie') givePie();
 }
@@ -1419,11 +1460,19 @@ function hurtPlayer(dmg, dirX, dirY, reason) {
   }
 }
 
-// Выстрел из лука: мышкой — в сторону курсора, с клавиатуры — куда смотрит персонаж.
-function shoot(atCursor) {
+// Выстрел из лука: мышкой — в сторону курсора, кнопкой — в сторону взгляда
+// или в заданную точку (автоприцел / правый стик геймпада).
+function shoot(atCursor, aimX, aimY) {
   if (shootTimer > 0) return;
   if (!hasBow()) {
-    say('Нужен лук — скрафти его (C)', '#ff9a8a');
+    say(
+      uiMode === 'touch'
+        ? 'Нужен лук — открой «КРАФТ»'
+        : uiMode === 'gamepad'
+          ? 'Нужен лук — открой крафт (LT)'
+          : 'Нужен лук — скрафти его (C)',
+      '#ff9a8a'
+    );
     return;
   }
   if (!invCount('arrow')) {
@@ -1432,7 +1481,10 @@ function shoot(atCursor) {
   }
   let ax;
   let ay;
-  if (atCursor && mouse.x >= 0 && mouse.y >= 0) {
+  if (typeof aimX === 'number' && typeof aimY === 'number' && (aimX || aimY)) {
+    ax = aimX;
+    ay = aimY;
+  } else if (atCursor && mouse.x >= 0 && mouse.y >= 0) {
     ax = mouse.x + camera.x - player.x;
     ay = mouse.y + camera.y - (player.y - 22);
   } else {
@@ -1677,7 +1729,7 @@ function startBossFight(id) {
     boss.castTimer = 0;
     boss.teleTimer = 6;
     sayBoss('Кто это в лес ко мне забрёл? Сейчас проучу!');
-    say('Баба-яга вышла из избушки! Стреляй из лука (мышка / F)', '#ff9a8a');
+    say('Баба-яга вышла из избушки! ' + shootHint(), '#ff9a8a');
     if (!catObj && Math.random() < 0.5) spawnCat();
   } else {
     boss.homeX = LESHY_HOME.x;
@@ -1686,7 +1738,7 @@ function startBossFight(id) {
     boss.y = LESHY_HOME.y;
     boss.rootTimer = 4.5;
     sayBoss('Стой! Дальше не пройдёшь, пока я жив.');
-    say('Лешего можно ранить только из лука!', '#ff9a8a');
+    say('Лешего можно ранить только из лука! ' + shootHint(), '#ff9a8a');
   }
 }
 
@@ -2046,62 +2098,739 @@ function catTalk() {
 
 /* ------------------------------- Ввод ------------------------------------ */
 
+// Ввод собран в одном месте: клавиатура, мышь, сенсорный экран и геймпад
+// переводятся в одни и те же действия. Так игра одинаково работает на
+// ноутбуке, телефоне и приставке.
+
 const keys = new Set();
 const mouse = { x: -1, y: -1, clicked: false };
+let lastTouchAt = 0;
+
+// Чем сейчас пользуется игрок: 'keyboard' | 'touch' | 'gamepad'.
+let uiMode = IS_TOUCH ? 'touch' : 'keyboard';
+
+let state = 'intro'; // 'intro' | 'select' | 'play' | 'faint' | 'win' | 'victory'
+let menuOpen = false; // пауза
+let menuSel = 0;
+let helpOpen = false; // краткая инструкция поверх игры
+let selectedSlot = 0; // слот, выбранный геймпадом (LB / RB)
+let introTime = 0;
+
+const toast = { text: '', color: '#f4e9c8', t: 0 };
+
+function showToast(text, color) {
+  toast.text = text;
+  toast.color = color || '#f4e9c8';
+  toast.t = 2.6;
+}
+
+function updateToast(dt) {
+  if (toast.t > 0) toast.t = Math.max(0, toast.t - dt);
+}
+
+function setInputMode(mode) {
+  if (mode !== 'keyboard' && mode !== 'touch' && mode !== 'gamepad') return;
+  if (uiMode === mode) return;
+  uiMode = mode;
+  if (mode !== 'touch') {
+    resetJoystick();
+    touchHeld.clear();
+  }
+}
+
+// --- Общие действия (их вызывают клавиши, кнопки телефона и геймпада) ------
+
+function dispatchAction(action) {
+  if (helpOpen) {
+    if (action === 'confirm' || action === 'back' || action === 'help' || action === 'menu') closeHelp();
+    return;
+  }
+  if (menuOpen) {
+    handleMenuAction(action);
+    return;
+  }
+  if (state === 'intro') {
+    if (action === 'confirm' || action === 'back') goToSelect();
+    return;
+  }
+  if (state === 'select') {
+    handleSelectAction(action);
+    return;
+  }
+  if (state === 'faint') {
+    if (action === 'confirm') startGame();
+    else if (action === 'back') state = 'select';
+    return;
+  }
+  if (state === 'win') {
+    if (action === 'confirm') backToCity();
+    else if (action === 'restart') startGame();
+    else if (action === 'back') state = 'select';
+    return;
+  }
+  if (state === 'victory') {
+    if (action === 'confirm' || action === 'back') closeVictory();
+    return;
+  }
+
+  // Дальше — только игра.
+  if (action === 'help') {
+    openHelp();
+    return;
+  }
+  if (action === 'menu') {
+    if (!dialog && !craftOpen && !shopOpen && !sleep.active) openMenu();
+    return;
+  }
+  if (sleep.active) return; // во сне управление выключено
+
+  if (dialog) {
+    if (action === 'confirm') advanceDialog();
+    else if (action === 'back') closeDialog();
+    return;
+  }
+  if (shopOpen) {
+    handleShopAction(action);
+    return;
+  }
+  if (craftOpen) {
+    handleCraftAction(action);
+    return;
+  }
+
+  switch (action) {
+    case 'back':
+      openMenu();
+      break;
+    case 'confirm':
+      // Рядом есть что собрать — собираем, иначе стреляем (как раньше с E).
+      if (nearObj) interact();
+      else shoot(false);
+      break;
+    case 'interact':
+      if (nearObj) interact();
+      break;
+    case 'shoot':
+      shoot(false);
+      break;
+    case 'craft':
+      toggleCraft();
+      break;
+    case 'use':
+      useSelectedSlot();
+      break;
+    case 'slotPrev':
+      cycleSlot(-1);
+      break;
+    case 'slotNext':
+      cycleSlot(1);
+      break;
+    default:
+      break;
+  }
+}
+
+function handleSelectAction(action) {
+  if (action === 'left') selChar = (selChar + CHARACTERS.length - 1) % CHARACTERS.length;
+  else if (action === 'right') selChar = (selChar + 1) % CHARACTERS.length;
+  else if (action === 'down') selEye = (selEye + 1) % EYE_COLORS.length;
+  else if (action === 'up') selEye = (selEye + EYE_COLORS.length - 1) % EYE_COLORS.length;
+  else if (action === 'confirm') startGame();
+  else if (action === 'back') state = 'intro';
+  else if (action === 'help') openHelp();
+}
+
+function handleCraftAction(action) {
+  if (action === 'back' || action === 'craft') {
+    craftOpen = false;
+    mouse.clicked = false;
+    return;
+  }
+  if (action === 'up' || action === 'left') {
+    craftSel = (craftSel + RECIPES.length - 1) % RECIPES.length;
+  } else if (action === 'down' || action === 'right') {
+    craftSel = (craftSel + 1) % RECIPES.length;
+  } else if (action === 'confirm') {
+    craft(RECIPES[craftSel]);
+  }
+}
+
+function handleShopAction(action) {
+  const last = CLOTHES.length - 1;
+  if (action === 'back' || action === 'craft') {
+    shopOpen = false;
+    mouse.clicked = false;
+    return;
+  }
+  if (action === 'left') shopSel = Math.max(0, shopSel - 1);
+  else if (action === 'right') shopSel = Math.min(last, shopSel + 1);
+  else if (action === 'up') shopSel = Math.max(0, shopSel - 2);
+  else if (action === 'down') shopSel = Math.min(last, shopSel + 2);
+  else if (action === 'confirm') shopClick(CLOTHES[shopSel]);
+}
+
+function handleMenuAction(action) {
+  const items = menuItems();
+  if (!items.length) return;
+  menuSel = clamp(menuSel, 0, items.length - 1);
+  if (action === 'up' || action === 'left') menuSel = (menuSel + items.length - 1) % items.length;
+  else if (action === 'down' || action === 'right') menuSel = (menuSel + 1) % items.length;
+  else if (action === 'confirm') menuActivate(items[menuSel].id);
+  else if (action === 'back' || action === 'menu') closeMenu();
+  else if (action === 'help') openHelp();
+}
+
+function goToSelect() {
+  state = 'select';
+  mouse.clicked = false;
+}
+
+function openMenu() {
+  if (state !== 'play' || sleep.active) return;
+  menuOpen = true;
+  helpOpen = false;
+  menuSel = 0;
+  keys.clear();
+  resetJoystick();
+  player.moving = false;
+  mouse.clicked = false;
+}
+
+function closeMenu() {
+  menuOpen = false;
+  keys.clear();
+  resetJoystick();
+  mouse.clicked = false;
+  player.moving = false;
+}
+
+function openHelp() {
+  if (state !== 'play' && state !== 'select') return;
+  helpOpen = true;
+  keys.clear();
+  resetJoystick();
+  player.moving = false;
+  mouse.clicked = false;
+}
+
+function closeHelp() {
+  helpOpen = false;
+  mouse.clicked = false;
+  player.moving = false;
+}
+
+function toggleCraft() {
+  if (craftOpen) {
+    craftOpen = false;
+    mouse.clicked = false;
+    return;
+  }
+  if (boss.active) {
+    say('Не до крафта — бой идёт!', '#ff9a8a');
+    return;
+  }
+  craftOpen = true;
+  shopOpen = false;
+  craftSel = 0;
+  keys.clear();
+  resetJoystick();
+  mouse.clicked = false;
+}
+
+function cycleSlot(dir) {
+  selectedSlot = (selectedSlot + dir + INV_SLOTS) % INV_SLOTS;
+  if (!inventory[selectedSlot]) {
+    showToast('Слот ' + (selectedSlot === 9 ? 0 : selectedSlot + 1) + ' пуст', '#9dbfa4');
+  }
+}
+
+function useSelectedSlot() {
+  if (!inventory[selectedSlot]) {
+    showToast('Слот пуст — выбери другой (LB / RB)', '#9dbfa4');
+    return;
+  }
+  useSlot(selectedSlot);
+}
+
+// --- Клавиатура -----------------------------------------------------------
+
+const KEY_ACTIONS = {
+  Escape: 'back',
+  Enter: 'confirm',
+  Space: 'confirm',
+  KeyE: 'confirm',
+  KeyF: 'shoot',
+  KeyC: 'craft',
+  KeyH: 'help',
+  KeyM: 'menu',
+  KeyR: 'restart',
+  ArrowLeft: 'left',
+  ArrowRight: 'right',
+  ArrowUp: 'up',
+  ArrowDown: 'down',
+  KeyA: 'left',
+  KeyD: 'right',
+  KeyW: 'up',
+  KeyS: 'down',
+};
+
+const REPEATABLE_KEYS = new Set([
+  'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
+  'KeyA', 'KeyD', 'KeyW', 'KeyS', 'KeyF',
+]);
+
+function handleDigit(code) {
+  const d = Number(code.slice(5)); // Digit0…Digit9 → 0…9
+  if (state === 'select') {
+    if (d >= 1 && d <= 5) selEye = d - 1;
+    return;
+  }
+  if (state !== 'play' || menuOpen || helpOpen || dialog || craftOpen || shopOpen || sleep.active) {
+    return;
+  }
+  const slot = d === 0 ? 9 : d - 1;
+  selectedSlot = slot;
+  useSlot(slot);
+}
 
 window.addEventListener('keydown', (e) => {
   keys.add(e.code);
   if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
-  if (state === 'select') handleSelectKey(e.code);
-  else if (state === 'faint') {
-    if (e.code === 'Escape') state = 'select';
-    else if (e.code === 'Enter' || e.code === 'Space') startGame();
-  } else if (state === 'win') {
-    if (e.code === 'Escape') state = 'select';
-    else if (e.code === 'KeyR') startGame();
-    else if (e.code === 'Enter' || e.code === 'Space') backToCity();
-  } else if (state === 'victory') {
-    if (e.code === 'Enter' || e.code === 'Space' || e.code === 'Escape') closeVictory();
-  } else handlePlayKey(e.code);
+  setInputMode('keyboard');
+  if (e.repeat && !REPEATABLE_KEYS.has(e.code)) return;
+  if (/^Digit[0-9]$/.test(e.code)) {
+    handleDigit(e.code);
+    return;
+  }
+  const action = KEY_ACTIONS[e.code];
+  if (action) dispatchAction(action);
 });
+window.addEventListener('keyup', (e) => keys.delete(e.code));
+window.addEventListener('blur', () => {
+  keys.clear();
+  resetJoystick();
+  touchHeld.clear();
+  touchTaps.clear();
+  pad.fireHeld = false;
+  mouse.clicked = false;
+});
+try {
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      keys.clear();
+      resetJoystick();
+      touchHeld.clear();
+      touchTaps.clear();
+      pad.fireHeld = false;
+      mouse.clicked = false;
+    }
+  });
+} catch (e) {
+  /* без visibilitychange игра тоже работает */
+}
 
-function handlePlayKey(code) {
-  if (sleep.active) return; // во сне управление выключено
-  if (dialog) {
-    if (code === 'KeyE' || code === 'Space' || code === 'Enter') advanceDialog();
-    else if (code === 'Escape') closeDialog();
+// --- Геймпад --------------------------------------------------------------
+
+const pad = {
+  connected: false,
+  index: -1,
+  id: '',
+  moveX: 0,
+  moveY: 0,
+  aimX: 0,
+  aimY: 0,
+  aimActive: false,
+  fireHeld: false,
+  prev: [],
+  navDir: null,
+  navTimer: 0,
+};
+
+const PAD_DEADZONE = 0.22;
+const PAD_AIM_DEADZONE = 0.35;
+
+function padDeadzone(v) {
+  const a = Math.abs(v);
+  if (a <= PAD_DEADZONE) return 0;
+  const k = (a - PAD_DEADZONE) / (1 - PAD_DEADZONE);
+  return Math.min(1, k) * (v < 0 ? -1 : 1);
+}
+
+function resetPad() {
+  pad.connected = false;
+  pad.index = -1;
+  pad.moveX = 0;
+  pad.moveY = 0;
+  pad.aimX = 0;
+  pad.aimY = 0;
+  pad.aimActive = false;
+  pad.fireHeld = false;
+  pad.prev = [];
+  pad.navDir = null;
+}
+
+function pollGamepad(dt) {
+  if (typeof navigator === 'undefined' || !navigator.getGamepads) {
+    if (pad.connected) {
+      resetPad();
+      setInputMode(IS_TOUCH ? 'touch' : 'keyboard');
+    }
     return;
   }
-  if (shopOpen) {
-    if (code === 'Escape' || code === 'KeyE' || code === 'KeyC') shopOpen = false;
+
+  let gp = null;
+  try {
+    const list = navigator.getGamepads() || [];
+    for (let i = 0; i < list.length; i++) {
+      if (list[i] && list[i].connected) {
+        gp = list[i];
+        break;
+      }
+    }
+  } catch (e) {
+    gp = null;
+  }
+
+  if (!gp) {
+    if (pad.connected) {
+      resetPad();
+      setInputMode(IS_TOUCH ? 'touch' : 'keyboard');
+      showToast('Геймпад отключён', '#ffd08a');
+    }
     return;
   }
-  if (code === 'Escape') {
-    if (craftOpen) craftOpen = false;
-    else state = 'select';
-  } else if (code === 'KeyC') {
-    if (boss.active) say('Не до крафта — бой идёт!', '#ff9a8a');
-    else craftOpen = !craftOpen;
-  } else if (code === 'KeyE' || code === 'Space') {
-    // рядом есть что собрать — собираем, иначе стреляем
-    if (nearObj) interact();
-    else shoot(false);
-  } else if (code === 'KeyF') {
-    shoot(false); // стрельба туда, куда смотрит персонаж
-  } else if (/^Digit[0-9]$/.test(code)) {
-    // 1..9 — слоты 1..9, 0 — десятый слот
-    const d = Number(code.slice(5));
-    useSlot(d === 0 ? 9 : d - 1);
+
+  const isNew = !pad.connected || pad.index !== gp.index;
+  pad.connected = true;
+  pad.index = gp.index;
+  pad.id = gp.id || '';
+  if (isNew) {
+    setInputMode('gamepad');
+    showToast('Геймпад подключён: A — действие, X — выстрел', '#a6e07a');
+  }
+
+  const buttons = gp.buttons || [];
+  const now = [];
+  for (let i = 0; i < 16; i++) {
+    const b = buttons[i];
+    now[i] = !!(b && (b.pressed || b.value > 0.5));
+  }
+  const just = (i) => !!now[i] && !pad.prev[i];
+
+  // Если геймпадом только что воспользовались, возвращаем подсказки геймпада.
+  const axesNow = gp.axes || [];
+  const active =
+    now.some(Boolean) ||
+    Math.abs(Number(axesNow[0]) || 0) > 0.3 ||
+    Math.abs(Number(axesNow[1]) || 0) > 0.3 ||
+    Math.abs(Number(axesNow[2]) || 0) > 0.3 ||
+    Math.abs(Number(axesNow[3]) || 0) > 0.3;
+  if (active && uiMode !== 'gamepad') setInputMode('gamepad');
+
+  // Кнопки меню и действий. A/B/Y/LB/RB работают во всех экранах.
+  if (just(9)) {
+    if (helpOpen) dispatchAction('back');
+    else if (!menuOpen && ['intro', 'select', 'faint', 'win', 'victory'].includes(state)) {
+      dispatchAction('confirm');
+    } else {
+      dispatchAction('menu');
+    }
+  }
+  if (just(8)) dispatchAction('help');
+  if (just(0)) dispatchAction('confirm');
+  if (just(1)) dispatchAction('back');
+  if (just(3)) dispatchAction('use');
+  if (just(4)) dispatchAction('slotPrev');
+  if (just(5)) dispatchAction('slotNext');
+  if (just(6)) dispatchAction('craft');
+  if (just(2) && state === 'win') dispatchAction('restart');
+
+  const axes = gp.axes || [];
+  const ax = Number(axes[0]) || 0;
+  const ay = Number(axes[1]) || 0;
+  const rx = Number(axes[2]) || 0;
+  const ry = Number(axes[3]) || 0;
+
+  const up = now[12] || ay < -0.55;
+  const down = now[13] || ay > 0.55;
+  const left = now[14] || ax < -0.55;
+  const right = now[15] || ax > 0.55;
+
+  // Навигация по меню: крестовина/стик с автоповтором.
+  let nav = null;
+  if (left && !right) nav = 'left';
+  else if (right && !left) nav = 'right';
+  else if (up && !down) nav = 'up';
+  else if (down && !up) nav = 'down';
+  if (nav && nav !== pad.navDir) {
+    pad.navDir = nav;
+    pad.navTimer = 0.42;
+    dispatchAction(nav);
+  } else if (nav && pad.navDir === nav) {
+    pad.navTimer -= dt;
+    if (pad.navTimer <= 0) {
+      pad.navTimer = 0.16;
+      dispatchAction(nav);
+    }
+  } else {
+    pad.navDir = null;
+  }
+
+  let mx = padDeadzone(ax);
+  let my = padDeadzone(ay);
+  if (now[14]) mx = -1;
+  if (now[15]) mx = 1;
+  if (now[12]) my = -1;
+  if (now[13]) my = 1;
+  const mlen = Math.hypot(mx, my);
+  if (mlen > 1) {
+    mx /= mlen;
+    my /= mlen;
+  }
+  pad.moveX = mx;
+  pad.moveY = my;
+
+  const aimLen = Math.hypot(rx, ry);
+  pad.aimActive = aimLen > PAD_AIM_DEADZONE;
+  if (pad.aimActive) {
+    pad.aimX = rx / aimLen;
+    pad.aimY = ry / aimLen;
+  }
+
+  // Стрельба: X или RT, можно держать. В меню и диалогах не стреляем.
+  const firePressed = !!now[2] || !!now[7];
+  pad.fireHeld = firePressed && state === 'play' && !hasBlockingModal();
+
+  pad.prev = now;
+}
+
+// --- Телефон и планшет ----------------------------------------------------
+
+const TOUCH_JOY = { cx: 106, cy: 492, r: 60, knob: 28 };
+
+const TOUCH_BUTTONS = [
+  { id: 'shoot', shape: 'circle', x: VIEW_W - 76, y: 528, r: 52, label: 'ОГОНЬ', font: 22 },
+  { id: 'interact', shape: 'rect', x: VIEW_W - 260, y: 432, w: 122, h: 62, label: 'ДЕЙСТВИЕ', font: 17 },
+  { id: 'craft', shape: 'rect', x: VIEW_W - 132, y: 368, w: 108, h: 50, label: 'КРАФТ', font: 18 },
+  { id: 'menu', shape: 'circle', x: VIEW_W - 32, y: 96, r: 22, label: '?', font: 24 },
+];
+
+const touchJoy = {
+  active: false,
+  id: null,
+  baseX: TOUCH_JOY.cx,
+  baseY: TOUCH_JOY.cy,
+  dx: 0,
+  dy: 0,
+};
+
+const touchHeld = new Map(); // identifier → id кнопки, которую держат
+const touchTaps = new Map(); // identifier → начатая «тыкалка» по экрану
+const touchFlash = { id: '', t: 0 };
+
+function resetJoystick() {
+  touchJoy.active = false;
+  touchJoy.id = null;
+  touchJoy.baseX = TOUCH_JOY.cx;
+  touchJoy.baseY = TOUCH_JOY.cy;
+  touchJoy.dx = 0;
+  touchJoy.dy = 0;
+}
+
+function touchPoint(t) {
+  const rect = canvas.getBoundingClientRect();
+  const w = rect.width || VIEW_W;
+  const h = rect.height || VIEW_H;
+  return {
+    x: ((t.clientX - rect.left) / w) * VIEW_W,
+    y: ((t.clientY - rect.top) / h) * VIEW_H,
+  };
+}
+
+function touchButtonAt(x, y) {
+  for (const b of TOUCH_BUTTONS) {
+    if (b.shape === 'circle') {
+      if (Math.hypot(x - b.x, y - b.y) <= b.r + 8) return b;
+    } else if (x >= b.x - 6 && x <= b.x + b.w + 6 && y >= b.y - 6 && y <= b.y + b.h + 6) {
+      return b;
+    }
+  }
+  return null;
+}
+
+function hasBlockingModal() {
+  return !!(dialog || craftOpen || shopOpen || sleep.active || menuOpen || helpOpen);
+}
+
+function hasTouchControls() {
+  return uiMode === 'touch' && state === 'play' && !hasBlockingModal();
+}
+
+function startJoystick(id, p) {
+  touchJoy.active = true;
+  touchJoy.id = id;
+  touchJoy.baseX = clamp(p.x, 70, 170);
+  touchJoy.baseY = clamp(p.y, 380, 515);
+  touchJoy.dx = 0;
+  touchJoy.dy = 0;
+}
+
+function updateJoystickTouch(p) {
+  const ox = p.x - touchJoy.baseX;
+  const oy = p.y - touchJoy.baseY;
+  const len = Math.hypot(ox, oy);
+  const r = TOUCH_JOY.r;
+  const k = len > r ? r / len : 1;
+  const dx = (ox * k) / r;
+  const dy = (oy * k) / r;
+  const m = Math.hypot(dx, dy);
+  touchJoy.dx = m < 0.14 ? 0 : dx;
+  touchJoy.dy = m < 0.14 ? 0 : dy;
+}
+
+function activateTouchButton(b, id) {
+  touchHeld.set(id, b.id);
+  touchFlash.id = b.id;
+  touchFlash.t = 0.18;
+  if (b.id === 'shoot') shootAim();
+  else if (b.id === 'interact') dispatchAction('interact');
+  else if (b.id === 'craft') toggleCraft();
+  else if (b.id === 'menu') openMenu();
+}
+
+function isFireHeld() {
+  if (pad.fireHeld) return true;
+  for (const id of touchHeld.values()) {
+    if (id === 'shoot') return true;
+  }
+  return false;
+}
+
+function handleTouchTap(x, y) {
+  mouse.x = x;
+  mouse.y = y;
+  mouse.clicked = true;
+
+  if (state === 'play' && dialog) {
+    advanceDialog();
+    mouse.clicked = false;
+    return;
+  }
+  if (state === 'play' && sleep.active) {
+    mouse.clicked = false;
+    return;
+  }
+  if (state === 'play' && !craftOpen && !shopOpen && !menuOpen && !helpOpen) {
+    // По HUD и часам не стреляем: это просто информационные панели.
+    const onHud = (x < 280 && y < 190) || (x > 690 && y < 65);
+    if (onHud && slotAt(x, y) < 0) mouse.clicked = false;
   }
 }
-window.addEventListener('keyup', (e) => keys.delete(e.code));
-window.addEventListener('blur', () => keys.clear());
+
+function onTouchStart(e) {
+  if (e.preventDefault) e.preventDefault();
+  lastTouchAt = Date.now();
+  setInputMode('touch');
+  const list = e.changedTouches || [];
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i];
+    const p = touchPoint(t);
+    if (state === 'play' && !hasBlockingModal()) {
+      // Левее инвентаря — джойстик; по самим слотам нужно именно нажимать.
+      if (!touchJoy.active && p.x < 190 && p.y > 360) {
+        startJoystick(t.identifier, p);
+        continue;
+      }
+      const b = touchButtonAt(p.x, p.y);
+      if (b) {
+        activateTouchButton(b, t.identifier);
+        continue;
+      }
+    }
+    touchTaps.set(t.identifier, {
+      x0: p.x,
+      y0: p.y,
+      x: p.x,
+      y: p.y,
+      moved: false,
+    });
+    mouse.x = p.x;
+    mouse.y = p.y;
+  }
+}
+
+function onTouchMove(e) {
+  if (e.preventDefault) e.preventDefault();
+  const list = e.changedTouches || [];
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i];
+    const p = touchPoint(t);
+    if (touchJoy.active && touchJoy.id === t.identifier) {
+      updateJoystickTouch(p);
+      continue;
+    }
+    const tap = touchTaps.get(t.identifier);
+    if (tap) {
+      if (Math.hypot(p.x - tap.x0, p.y - tap.y0) > 18) tap.moved = true;
+      tap.x = p.x;
+      tap.y = p.y;
+    }
+  }
+}
+
+function onTouchEnd(e) {
+  if (e.preventDefault) e.preventDefault();
+  const list = e.changedTouches || [];
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i];
+    if (touchJoy.active && touchJoy.id === t.identifier) resetJoystick();
+    touchHeld.delete(t.identifier);
+    const tap = touchTaps.get(t.identifier);
+    if (tap) {
+      touchTaps.delete(t.identifier);
+      if (!tap.moved) handleTouchTap(tap.x, tap.y);
+    }
+  }
+}
+
+function onTouchCancel(e) {
+  if (e.preventDefault) e.preventDefault();
+  resetJoystick();
+  touchHeld.clear();
+  touchTaps.clear();
+}
+
+canvas.addEventListener('touchstart', onTouchStart, { passive: false });
+canvas.addEventListener('touchmove', onTouchMove, { passive: false });
+canvas.addEventListener('touchend', onTouchEnd, { passive: false });
+canvas.addEventListener('touchcancel', onTouchCancel, { passive: false });
+canvas.addEventListener('contextmenu', (e) => {
+  if (e.preventDefault) e.preventDefault();
+});
+
+function updateTouchUi(dt) {
+  if (touchFlash.t > 0) touchFlash.t = Math.max(0, touchFlash.t - dt);
+  if (touchJoy.active && hasBlockingModal()) resetJoystick();
+}
+
+function isPortraitTouch() {
+  if (!IS_TOUCH) return false;
+  try {
+    return window.innerHeight > window.innerWidth;
+  } catch (e) {
+    return false;
+  }
+}
+
+// --- Мышь ----------------------------------------------------------------
 
 function canvasPos(e) {
   const rect = canvas.getBoundingClientRect();
+  const w = rect.width || VIEW_W;
+  const h = rect.height || VIEW_H;
   return {
-    x: ((e.clientX - rect.left) / rect.width) * VIEW_W,
-    y: ((e.clientY - rect.top) / rect.height) * VIEW_H,
+    x: ((e.clientX - rect.left) / w) * VIEW_W,
+    y: ((e.clientY - rect.top) / h) * VIEW_H,
   };
 }
 canvas.addEventListener('mousemove', (e) => {
@@ -2114,15 +2843,83 @@ canvas.addEventListener('mouseleave', () => {
   mouse.y = -1;
 });
 canvas.addEventListener('click', (e) => {
+  // На телефоне после касания браузер иногда присылает ещё и click — его не слушаем.
+  if (Date.now() - lastTouchAt < 700) return;
+  setInputMode('keyboard');
   const p = canvasPos(e);
   mouse.x = p.x;
   mouse.y = p.y;
   mouse.clicked = true;
 });
 
+// --- Движение и прицеливание ----------------------------------------------
+
+function getMoveVector() {
+  let x = 0;
+  let y = 0;
+  if (keys.has('KeyA') || keys.has('ArrowLeft')) x -= 1;
+  if (keys.has('KeyD') || keys.has('ArrowRight')) x += 1;
+  if (keys.has('KeyW') || keys.has('ArrowUp')) y -= 1;
+  if (keys.has('KeyS') || keys.has('ArrowDown')) y += 1;
+  if (touchJoy.active) {
+    x += touchJoy.dx;
+    y += touchJoy.dy;
+  }
+  if (pad.connected) {
+    x += pad.moveX;
+    y += pad.moveY;
+  }
+  const len = Math.hypot(x, y);
+  if (len > 1) {
+    x /= len;
+    y /= len;
+  }
+  return { x, y, len: Math.min(1, len) };
+}
+
+// Автоприцел для телефона и геймпада: ищем ближайшую живую цель.
+function findNearestTarget(maxDist) {
+  let best = null;
+  let bestD = maxDist;
+  for (const e of enemies) {
+    const d = Math.hypot(e.x - player.x, e.y - player.y);
+    if (d < bestD) {
+      bestD = d;
+      best = { x: e.x, y: e.y };
+    }
+  }
+  if (boss.active) {
+    const d = Math.hypot(boss.x - player.x, boss.y - player.y);
+    if (d < bestD) {
+      bestD = d;
+      best = { x: boss.x, y: boss.y };
+    }
+  }
+  return best;
+}
+
+function shootAim() {
+  if (uiMode === 'gamepad' && pad.aimActive) {
+    shoot(false, pad.aimX, pad.aimY);
+    return;
+  }
+  const target = findNearestTarget(620);
+  if (target) {
+    shoot(false, target.x - player.x, target.y - player.y);
+    return;
+  }
+  shoot(false);
+}
+
+// Как стрелять — зависит от того, чем играет человек.
+function shootHint() {
+  if (uiMode === 'touch') return 'Жми «ОГОНЬ» — герой сам прицелится';
+  if (uiMode === 'gamepad') return 'Жми X или RT — правый стик прицеливается';
+  return 'Стреляй мышкой или пробелом';
+}
+
 /* --------------------------- Экран выбора -------------------------------- */
 
-let state = 'select'; // 'select' | 'play'
 let selChar = 0;
 let selEye = 0;
 let selTime = 0;
@@ -2134,6 +2931,7 @@ const SWATCH = { size: 44, gap: 18, y: 424 };
 SWATCH.x0 = (VIEW_W - (SWATCH.size * 5 + SWATCH.gap * 4)) / 2;
 
 const PLAY_BTN = { x: VIEW_W / 2 - 130, y: 508, w: 260, h: 54 };
+const SELECT_HELP = { x: 14, y: 14, w: 56, h: 56 };
 
 function cardRect(i) {
   return { x: CARD.x0 + i * (CARD.w + CARD.gap), y: CARD.y, w: CARD.w, h: CARD.h };
@@ -2145,13 +2943,235 @@ function hit(r, x, y) {
   return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
 }
 
-function handleSelectKey(code) {
-  if (code === 'ArrowLeft' || code === 'KeyA') selChar = (selChar + CHARACTERS.length - 1) % CHARACTERS.length;
-  else if (code === 'ArrowRight' || code === 'KeyD') selChar = (selChar + 1) % CHARACTERS.length;
-  else if (code === 'ArrowDown' || code === 'KeyS') selEye = (selEye + 1) % EYE_COLORS.length;
-  else if (code === 'ArrowUp' || code === 'KeyW') selEye = (selEye + EYE_COLORS.length - 1) % EYE_COLORS.length;
-  else if (code === 'Enter' || code === 'Space') startGame();
-  else if (/^Digit[1-5]$/.test(code)) selEye = Number(code.slice(5)) - 1;
+/* ------------------- Краткая инструкция перед началом -------------------- */
+
+const INTRO_BTN = { x: VIEW_W / 2 - 150, y: 512, w: 300, h: 52 };
+const GUIDE_PANEL = { x: Math.round((VIEW_W - 872) / 2), y: 92, w: 872, h: 404 };
+
+const GUIDE_STEPS = [
+  'Собирай палки, листья, еду и уголь. Жми «Действие».',
+  'Скрафти лук и стрелы — без них боссов не победить.',
+  'Ночью приходят волки. Костёр и кровать помогают.',
+  'Победи боссов и войди в ворота — там город и финал.',
+];
+
+function guideControls() {
+  if (uiMode === 'touch') {
+    return [
+      ['Джойстик', 'ходить по лесу'],
+      ['ОГОНЬ', 'стрелять, целится сам'],
+      ['ДЕЙСТВИЕ', 'собрать, войти, говорить'],
+      ['КРАФТ', 'лук, стрелы, кровать'],
+      ['Слоты', 'нажми, чтобы съесть'],
+      ['?', 'меню и помощь'],
+    ];
+  }
+  if (uiMode === 'gamepad') {
+    return [
+      ['Стик / крест', 'ходить'],
+      ['A', 'действие и «дальше»'],
+      ['X / RT', 'стрелять, стик — прицел'],
+      ['Y', 'использовать предмет'],
+      ['LB / RB', 'выбрать слот'],
+      ['LT', 'крафт'],
+      ['Start / Back', 'меню и помощь'],
+    ];
+  }
+  return [
+    ['WASD / стрелки', 'ходить'],
+    ['E / пробел', 'собрать, войти, говорить'],
+    ['Мышь / F', 'стрелять'],
+    ['C', 'крафт'],
+    ['1–0', 'предмет из слота'],
+    ['H / Esc', 'помощь и меню'],
+  ];
+}
+
+function guideModeName() {
+  if (uiMode === 'touch') return 'ТЕЛЕФОН';
+  if (uiMode === 'gamepad') return 'ГЕЙМПАД';
+  return 'КЛАВИАТУРА';
+}
+
+function drawGuidePanel() {
+  const p = GUIDE_PANEL;
+  const leftX = p.x + 34;
+  const rightX = p.x + 476;
+  const headY = p.y + 32;
+  const bodySize = IS_TOUCH ? 19 : 17;
+  const bodyLine = IS_TOUCH ? 24 : 21;
+  const stepGap = IS_TOUCH ? 50 : 48;
+  const headingSize = IS_TOUCH ? 20 : 18;
+
+  ctx.fillStyle = 'rgba(14, 28, 19, 0.94)';
+  ctx.fillRect(p.x, p.y, p.w, p.h);
+  ctx.strokeStyle = '#4a6b52';
+  ctx.lineWidth = 3;
+  ctx.strokeRect(p.x + 1.5, p.y + 1.5, p.w - 3, p.h - 3);
+
+  // тонкая разделительная линия между целью и управлением
+  ctx.strokeStyle = 'rgba(74, 107, 82, 0.7)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(p.x + 452, p.y + 24);
+  ctx.lineTo(p.x + 452, p.y + p.h - 58);
+  ctx.stroke();
+
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#ffdf7a';
+  ctx.font = 'bold ' + headingSize + 'px "Courier New", monospace';
+  ctx.fillText('ТВОЯ ЦЕЛЬ', leftX, headY);
+  ctx.fillText('УПРАВЛЕНИЕ', rightX, headY);
+
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#8fae96';
+  ctx.font = '13px "Courier New", monospace';
+  ctx.fillText(guideModeName(), p.x + p.w - 30, headY);
+  ctx.textAlign = 'left';
+
+  ctx.fillStyle = '#f4e9c8';
+  ctx.font = bodySize + 'px "Courier New", monospace';
+  wrapText(
+    'Выжить в лесу: победить Бабу-ягу и Лешего и добраться до города.',
+    leftX,
+    headY + 28,
+    400,
+    bodyLine
+  );
+
+  ctx.fillStyle = '#ffdf7a';
+  ctx.font = 'bold ' + headingSize + 'px "Courier New", monospace';
+  ctx.fillText('ЧТО ДЕЛАТЬ', leftX, headY + 104);
+
+  const actionName = uiMode === 'touch' ? '«Действие»' : uiMode === 'gamepad' ? 'A' : 'E';
+  const steps = GUIDE_STEPS.slice();
+  steps[0] =
+    'Собирай палки, листья, еду и уголь. ' +
+    (uiMode === 'touch' ? 'Жми ' + actionName + '.' : 'Подойди и жми ' + actionName + '.');
+  for (let i = 0; i < steps.length; i++) {
+    const y = headY + 132 + i * stepGap;
+    ctx.fillStyle = '#ffdf7a';
+    ctx.font = 'bold ' + bodySize + 'px "Courier New", monospace';
+    ctx.fillText(String(i + 1) + '.', leftX, y);
+    ctx.fillStyle = '#cfe3d2';
+    ctx.font = bodySize + 'px "Courier New", monospace';
+    wrapText(steps[i], leftX + 26, y, 366, bodyLine);
+  }
+
+  const controls = guideControls();
+  for (let i = 0; i < controls.length; i++) {
+    const y = headY + 38 + i * 34;
+    ctx.fillStyle = '#ffdf7a';
+    ctx.font = 'bold 15px "Courier New", monospace';
+    ctx.fillText(controls[i][0] + ' —', rightX, y);
+    ctx.fillStyle = '#cfe3d2';
+    ctx.font = '16px "Courier New", monospace';
+    wrapText(controls[i][1], rightX + 160, y, 236, 18);
+  }
+
+  ctx.fillStyle = '#8fae96';
+  ctx.font = '14px "Courier New", monospace';
+  const note =
+    uiMode === 'touch'
+      ? 'Телефон держи горизонтально — так удобнее.'
+      : uiMode === 'gamepad'
+        ? 'Нажми любую кнопку — геймпад уже подключён.'
+        : 'Геймпад подключается сам. H — помощь в игре.';
+  wrapText(note, rightX, headY + 270, 330, 19);
+
+  // нижняя подсказка на всю ширину панели
+  ctx.strokeStyle = 'rgba(74, 107, 82, 0.7)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(p.x + 26, p.y + p.h - 48);
+  ctx.lineTo(p.x + p.w - 26, p.y + p.h - 48);
+  ctx.stroke();
+  ctx.fillStyle = '#9dbfa4';
+  ctx.font = '14px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(
+    'Совет: голод не ждёт — ешь яблоки, бананы и овощи. Синее зелье лечит.',
+    p.x + p.w / 2,
+    p.y + p.h - 20
+  );
+  ctx.textAlign = 'left';
+}
+
+function drawGuideScreen(mode) {
+  const isHelp = mode === 'help';
+  const grad = ctx.createLinearGradient(0, 0, 0, VIEW_H);
+  grad.addColorStop(0, '#20402c');
+  grad.addColorStop(1, '#14251b');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+  drawBackdropTrees();
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#f4e9c8';
+  ctx.font = 'bold 38px "Courier New", monospace';
+  ctx.fillText(isHelp ? 'КАК ИГРАТЬ' : 'ЖИЗНЬ В ЛЕСУ', VIEW_W / 2, 48);
+  ctx.fillStyle = '#9dbfa4';
+  ctx.font = (IS_TOUCH ? 18 : 16) + 'px "Courier New", monospace';
+  ctx.fillText(
+    isHelp
+      ? state === 'play'
+        ? 'Игра на паузе — цель, шаги и управление'
+        : 'Коротко о цели, шагах и управлении'
+      : 'Короткая инструкция: цель, шаги и управление',
+    VIEW_W / 2,
+    76
+  );
+
+  drawGuidePanel();
+
+  ctx.textAlign = 'center';
+  const hovered = hit(INTRO_BTN, mouse.x, mouse.y);
+  ctx.fillStyle = hovered ? '#7bbd63' : '#5d9a4c';
+  ctx.fillRect(INTRO_BTN.x, INTRO_BTN.y, INTRO_BTN.w, INTRO_BTN.h);
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = '#f4e9c8';
+  ctx.strokeRect(INTRO_BTN.x + 1.5, INTRO_BTN.y + 1.5, INTRO_BTN.w - 3, INTRO_BTN.h - 3);
+  ctx.fillStyle = '#12240f';
+  ctx.font = 'bold 21px "Courier New", monospace';
+  ctx.fillText(
+    isHelp ? 'ПРОДОЛЖИТЬ' : 'ДАЛЬШЕ',
+    INTRO_BTN.x + INTRO_BTN.w / 2,
+    INTRO_BTN.y + 34
+  );
+
+  ctx.fillStyle = '#7f9c86';
+  ctx.font = (IS_TOUCH ? 15 : 13) + 'px "Courier New", monospace';
+  ctx.fillText(
+    isHelp
+      ? state === 'play'
+        ? 'Esc / B / H — закрыть. Игра продолжается с того же места.'
+        : 'Esc / B / H — закрыть.'
+      : 'Дальше — выбор героя. Играть можно с клавиатуры, телефона и геймпада.',
+    VIEW_W / 2,
+    584
+  );
+  ctx.textAlign = 'left';
+}
+
+function drawIntro() {
+  drawGuideScreen('intro');
+}
+
+function drawHelpScreen() {
+  drawGuideScreen('help');
+}
+
+function updateIntro(dt) {
+  introTime += dt;
+  if (!mouse.clicked) return;
+  mouse.clicked = false;
+  if (hit(INTRO_BTN, mouse.x, mouse.y)) goToSelect();
+}
+
+function updateHelp() {
+  if (!mouse.clicked) return;
+  mouse.clicked = false;
+  if (hit(INTRO_BTN, mouse.x, mouse.y)) closeHelp();
 }
 
 function startGame() {
@@ -2178,7 +3198,20 @@ function startGame() {
   wolfTimer = 4;
   batTimer = 3;
   craftOpen = false;
+  shopOpen = false;
+  dialog = null;
+  menuOpen = false;
+  helpOpen = false;
+  selectedSlot = 0;
+  craftSel = 0;
+  shopSel = 0;
   sleep.active = false;
+  keys.clear();
+  resetJoystick();
+  touchHeld.clear();
+  touchTaps.clear();
+  pad.fireHeld = false;
+  mouse.clicked = false;
   clock.t = 0;
   clock.day = 1;
   faintReason = 'Ты обессилел от голода';
@@ -2233,6 +3266,10 @@ function updateSelect(dt) {
   for (let i = 0; i < EYE_COLORS.length; i++) {
     if (hit(swatchRect(i), mouse.x, mouse.y)) selEye = i;
   }
+  if (hit(SELECT_HELP, mouse.x, mouse.y)) {
+    openHelp();
+    return;
+  }
   if (hit(PLAY_BTN, mouse.x, mouse.y)) startGame();
 }
 
@@ -2250,7 +3287,7 @@ function drawSelect() {
   ctx.font = 'bold 40px "Courier New", monospace';
   ctx.fillText('ЖИЗНЬ В ЛЕСУ', VIEW_W / 2, 58);
   ctx.fillStyle = '#9dbfa4';
-  ctx.font = '16px "Courier New", monospace';
+  ctx.font = '17px "Courier New", monospace';
   ctx.fillText('Выбери персонажа и цвет глаз', VIEW_W / 2, 84);
 
   // сколько алмазиков накоплено (их тратят в лавке в лесу)
@@ -2260,6 +3297,17 @@ function drawSelect() {
   ctx.font = 'bold 16px "Courier New", monospace';
   ctx.fillText(String(progress.diamonds), VIEW_W - 96, 36);
   ctx.textAlign = 'center';
+
+  // кнопка «?» — вернуться к инструкции
+  const helpHover = hit(SELECT_HELP, mouse.x, mouse.y);
+  ctx.fillStyle = helpHover ? '#3b5f43' : 'rgba(12, 26, 18, 0.7)';
+  ctx.fillRect(SELECT_HELP.x, SELECT_HELP.y, SELECT_HELP.w, SELECT_HELP.h);
+  ctx.strokeStyle = helpHover ? '#f4e9c8' : '#4a6b52';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(SELECT_HELP.x + 1, SELECT_HELP.y + 1, SELECT_HELP.w - 2, SELECT_HELP.h - 2);
+  ctx.fillStyle = '#f4e9c8';
+  ctx.font = 'bold 28px "Courier New", monospace';
+  ctx.fillText('?', SELECT_HELP.x + SELECT_HELP.w / 2, SELECT_HELP.y + 39);
 
   // карточки персонажей
   for (let i = 0; i < CHARACTERS.length; i++) {
@@ -2285,20 +3333,20 @@ function drawSelect() {
     drawCharacter(ctx, r.x + r.w / 2, r.y + 176 + bob, 6, def, EYE_COLORS[selEye].color, 'down', frame);
 
     ctx.fillStyle = active ? '#f4e9c8' : '#cfe3d2';
-    ctx.font = 'bold 15px "Courier New", monospace';
-    wrapText(def.name, r.x + r.w / 2, r.y + 210, r.w - 16, 17);
+    ctx.font = 'bold ' + (IS_TOUCH ? 17 : 16) + 'px "Courier New", monospace';
+    wrapText(def.name, r.x + r.w / 2, r.y + 210, r.w - 16, 18);
     ctx.fillStyle = '#8fae96';
-    ctx.font = '12px "Courier New", monospace';
-    def.desc.forEach((line, k) => ctx.fillText(line, r.x + r.w / 2, r.y + 240 + k * 15));
+    ctx.font = (IS_TOUCH ? 14 : 13) + 'px "Courier New", monospace';
+    def.desc.forEach((line, k) => ctx.fillText(line, r.x + r.w / 2, r.y + 242 + k * 16));
 
     ctx.fillStyle = '#6f8f77';
-    ctx.font = '11px "Courier New", monospace';
+    ctx.font = '12px "Courier New", monospace';
     ctx.fillText(String(i + 1), r.x + 14, r.y + 20);
   }
 
   // выбор цвета глаз
   ctx.fillStyle = '#cfe3d2';
-  ctx.font = '16px "Courier New", monospace';
+  ctx.font = (IS_TOUCH ? 17 : 16) + 'px "Courier New", monospace';
   ctx.fillText('Цвет глаз: ' + EYE_COLORS[selEye].name, VIEW_W / 2, SWATCH.y - 14);
   for (let i = 0; i < EYE_COLORS.length; i++) {
     const r = swatchRect(i);
@@ -2329,8 +3377,16 @@ function drawSelect() {
   ctx.fillText('В ЛЕС!', PLAY_BTN.x + PLAY_BTN.w / 2, PLAY_BTN.y + 36);
 
   ctx.fillStyle = '#7f9c86';
-  ctx.font = '12px "Courier New", monospace';
-  ctx.fillText('мышка или: ← → персонаж, ↑ ↓ (или 1–5) глаза, Enter — начать', VIEW_W / 2, VIEW_H - 14);
+  ctx.font = (IS_TOUCH ? 15 : 13) + 'px "Courier New", monospace';
+  ctx.fillText(
+    uiMode === 'touch'
+      ? 'Нажми на героя, выбери глаза и жми «В ЛЕС!» · ? — помощь'
+      : uiMode === 'gamepad'
+        ? 'Стик / крест — выбор · A — начать · Back — помощь'
+        : 'мышка или: ← → персонаж, ↑ ↓ (1–5) глаза, Enter — начать · H — помощь',
+    VIEW_W / 2,
+    VIEW_H - 14
+  );
 }
 
 // Декоративные ёлки по краям экрана выбора.
@@ -2410,23 +3466,17 @@ function updatePlay(dt) {
     return;
   }
 
-  let dx = 0;
-  let dy = 0;
-  if (keys.has('KeyA') || keys.has('ArrowLeft')) dx -= 1;
-  if (keys.has('KeyD') || keys.has('ArrowRight')) dx += 1;
-  if (keys.has('KeyW') || keys.has('ArrowUp')) dy -= 1;
-  if (keys.has('KeyS') || keys.has('ArrowDown')) dy += 1;
-
-  player.moving = dx !== 0 || dy !== 0;
+  const move = getMoveVector();
+  player.moving = move.len > 0.08;
   if (player.moving) {
-    const len = Math.hypot(dx, dy);
-    dx /= len;
-    dy /= len;
+    const len = Math.hypot(move.x, move.y) || 1;
+    const dx = move.x / len;
+    const dy = move.y / len;
     // направление взгляда: приоритет у того, что сильнее нажато
     if (Math.abs(dx) > Math.abs(dy)) player.dir = dx > 0 ? 'right' : 'left';
     else player.dir = dy > 0 ? 'down' : 'up';
 
-    const dist = player.speed * dt;
+    const dist = player.speed * dt * move.len;
     moveAxis(dx * dist, 0);
     moveAxis(0, dy * dist);
     player.animTime += dt;
@@ -2453,11 +3503,19 @@ function updatePlay(dt) {
   updateFloaters(dt);
   nearObj = findInteractable();
 
+  // На телефоне и геймпаде кнопку огня можно держать: стрелы летят с кулдауном.
+  if (isFireHeld()) shootAim();
+
   if (mouse.clicked) {
     const slot = slotAt(mouse.x, mouse.y);
-    if (slot >= 0) useSlot(slot); // клик по инвентарю — использовать предмет
-    else if (hasBow()) shoot(true); // с луком клик по карте — выстрел в сторону курсора
-    else if (nearObj) interact(); // без лука клик просто собирает то, что рядом
+    if (slot >= 0) {
+      selectedSlot = slot;
+      useSlot(slot); // клик по инвентарю — использовать предмет
+    } else if (hasBow()) {
+      shoot(true); // с луком клик по карте — выстрел в сторону курсора
+    } else if (nearObj) {
+      interact(); // без лука клик просто собирает то, что рядом
+    }
   }
   mouse.clicked = false;
 }
@@ -2664,6 +3722,7 @@ function interact() {
     catTalk();
   } else if (o.type === 'shopCart') {
     shopOpen = true;
+    shopSel = 0;
     craftOpen = false;
     mouse.clicked = false;
     nearObj = findInteractable();
@@ -2791,9 +3850,9 @@ function useSlot(i) {
   } else if (item.throwable) {
     throwBomb();
   } else if (slot.id === 'bow' || slot.id === 'crystalBow') {
-    say(invCount('arrow') ? 'Стреляй мышкой или пробелом' : 'Нужны стрелы — скрафти их (C)', '#cfe3d2');
+    say(invCount('arrow') ? shootHint() : 'Нужны стрелы — скрафти их (C)', '#cfe3d2');
   } else if (slot.id === 'arrow') {
-    say('Стрелы летят из лука: мышка или пробел', '#cfe3d2');
+    say('Стрелы летят из лука: ' + shootHint().toLowerCase(), '#cfe3d2');
   } else {
     say(item.name + ' — пригодится позже', '#cfe3d2');
   }
@@ -2945,9 +4004,11 @@ function drawPlay() {
   drawNight();
   drawExplosions();
   drawHurtFlash();
+  drawPadAim();
   drawHud();
   drawInventory();
   drawCrosshair();
+  if (hasTouchControls()) drawTouchControls();
   if (craftOpen) drawCraftPanel();
   if (shopOpen) drawShop();
   if (sleep.active) drawSleepOverlay();
@@ -2967,6 +4028,7 @@ function drawHurtFlash() {
 
 // Прицел под курсором, когда лук со стрелами наготове.
 function drawCrosshair() {
+  if (uiMode !== 'keyboard') return; // на телефоне и геймпаде прицел свой
   if (!hasBow() || mouse.x < 0 || slotAt(mouse.x, mouse.y) >= 0) return;
   const ready = invCount('arrow') > 0 && shootTimer <= 0;
   ctx.strokeStyle = ready ? '#f4e9c8' : '#8c6b6b';
@@ -2984,6 +4046,151 @@ function drawCrosshair() {
   ctx.moveTo(mouse.x, mouse.y + 4);
   ctx.lineTo(mouse.x, mouse.y + 14);
   ctx.stroke();
+}
+
+// Прицел правого стика геймпада.
+function drawPadAim() {
+  if (uiMode !== 'gamepad' || !pad.aimActive || state !== 'play' || hasBlockingModal()) return;
+  const px = player.x - camera.x;
+  const py = player.y - camera.y - 22;
+  const x = px + pad.aimX * 92;
+  const y = py + pad.aimY * 92;
+  ctx.strokeStyle = 'rgba(244, 233, 200, 0.85)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(px + pad.aimX * 30, py + pad.aimY * 30);
+  ctx.lineTo(x - pad.aimX * 8, y - pad.aimY * 8);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(x, y, 9, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x - 14, y);
+  ctx.lineTo(x - 4, y);
+  ctx.moveTo(x + 4, y);
+  ctx.lineTo(x + 14, y);
+  ctx.moveTo(x, y - 14);
+  ctx.lineTo(x, y - 4);
+  ctx.moveTo(x, y + 4);
+  ctx.lineTo(x, y + 14);
+  ctx.stroke();
+}
+
+function roundRectPath(x, y, w, h, r) {
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.lineTo(x + w - rr, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+  ctx.lineTo(x + w, y + h - rr);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+  ctx.lineTo(x + rr, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+  ctx.lineTo(x, y + rr);
+  ctx.quadraticCurveTo(x, y, x + rr, y);
+  ctx.closePath();
+}
+
+// Экранные кнопки телефона: джойстик слева, действия справа.
+function drawTouchControls() {
+  const active = touchJoy.active;
+
+  // Джойстик
+  const jx = active ? touchJoy.baseX : TOUCH_JOY.cx;
+  const jy = active ? touchJoy.baseY : TOUCH_JOY.cy;
+  ctx.save();
+  ctx.globalAlpha = active ? 0.95 : 0.62;
+  ctx.fillStyle = 'rgba(12, 26, 18, 0.72)';
+  ctx.beginPath();
+  ctx.arc(jx, jy, TOUCH_JOY.r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#6f9a78';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(244, 233, 200, 0.16)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(jx - TOUCH_JOY.r + 10, jy);
+  ctx.lineTo(jx + TOUCH_JOY.r - 10, jy);
+  ctx.moveTo(jx, jy - TOUCH_JOY.r + 10);
+  ctx.lineTo(jx, jy + TOUCH_JOY.r - 10);
+  ctx.stroke();
+
+  const kx = jx + touchJoy.dx * (TOUCH_JOY.r - TOUCH_JOY.knob / 2);
+  const ky = jy + touchJoy.dy * (TOUCH_JOY.r - TOUCH_JOY.knob / 2);
+  ctx.fillStyle = active ? 'rgba(123, 189, 99, 0.95)' : 'rgba(70, 105, 80, 0.9)';
+  ctx.beginPath();
+  ctx.arc(kx, ky, TOUCH_JOY.knob, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#f4e9c8';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#cfe3d2';
+  ctx.font = '13px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('ХОДЬБА', jx, jy + TOUCH_JOY.r + 18);
+  ctx.restore();
+
+  // Кнопки
+  for (const b of TOUCH_BUTTONS) {
+    let pressed = touchFlash.t > 0 && touchFlash.id === b.id;
+    if (!pressed) {
+      for (const id of touchHeld.values()) {
+        if (id === b.id) {
+          pressed = true;
+          break;
+        }
+      }
+    }
+    ctx.save();
+    ctx.globalAlpha = b.id === 'menu' ? 0.82 : 0.9;
+    if (b.shape === 'circle') {
+      ctx.fillStyle = pressed ? 'rgba(123, 189, 99, 0.92)' : 'rgba(12, 26, 18, 0.78)';
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = b.id === 'shoot' ? '#ffdf7a' : '#f4e9c8';
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      ctx.fillStyle = b.id === 'shoot' ? (pressed ? '#12240f' : '#ffdf7a') : '#f4e9c8';
+      ctx.font = 'bold ' + b.font + 'px "Courier New", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(b.label, b.x, b.y + 7);
+    } else {
+      roundRectPath(b.x, b.y, b.w, b.h, 14);
+      ctx.fillStyle = pressed ? 'rgba(123, 189, 99, 0.92)' : 'rgba(12, 26, 18, 0.78)';
+      ctx.fill();
+      ctx.strokeStyle = '#f4e9c8';
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+      ctx.fillStyle = pressed ? '#12240f' : '#f4e9c8';
+      ctx.font = 'bold ' + b.font + 'px "Courier New", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2 + 6);
+    }
+    ctx.restore();
+  }
+}
+
+// Короткое сообщение вверху экрана.
+function drawToast() {
+  if (toast.t <= 0 || !toast.text) return;
+  const alpha = Math.min(1, toast.t / 0.5);
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.font = 'bold 15px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  const w = Math.min(VIEW_W - 40, ctx.measureText(toast.text).width + 34);
+  const x = (VIEW_W - w) / 2;
+  ctx.fillStyle = 'rgba(8, 18, 12, 0.92)';
+  ctx.fillRect(x, 64, w, 34);
+  ctx.strokeStyle = toast.color;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x + 1, 65, w - 2, 32);
+  ctx.fillStyle = toast.color;
+  ctx.fillText(toast.text, VIEW_W / 2, 86);
+  ctx.restore();
 }
 
 // Вспышка взрыва рисуется поверх темноты, чтобы её было видно и ночью.
@@ -3093,20 +4300,22 @@ function drawSleepOverlay() {
 
 // Подсказка над объектом, до которого персонаж дотянулся.
 function drawPrompt() {
-  if (!nearObj || craftOpen || sleep.active || dialog || shopOpen) return;
+  if (!nearObj || craftOpen || sleep.active || dialog || shopOpen || menuOpen || helpOpen) return;
   const o = nearObj;
   const info = interactInfo(o);
   if (!info) return;
-  const text = info.locked ? info.text : 'E — ' + info.text;
+  const action =
+    uiMode === 'touch' ? 'ДЕЙСТВИЕ' : uiMode === 'gamepad' ? 'A' : 'E';
+  const text = info.locked ? info.text : action + ' — ' + info.text;
   const top = info.top;
-  ctx.font = '13px "Courier New", monospace';
-  const w = ctx.measureText(text).width + 16;
+  ctx.font = (IS_TOUCH ? 17 : 15) + 'px "Courier New", monospace';
+  const w = ctx.measureText(text).width + 18;
   ctx.textAlign = 'center';
-  ctx.fillStyle = 'rgba(12, 26, 18, 0.85)';
-  ctx.fillRect(o.x - w / 2, top - 20, w, 22);
+  ctx.fillStyle = 'rgba(12, 26, 18, 0.88)';
+  ctx.fillRect(o.x - w / 2, top - 22, w, 24);
   ctx.strokeStyle = '#f4e9c8';
   ctx.lineWidth = 2;
-  ctx.strokeRect(o.x - w / 2, top - 20, w, 22);
+  ctx.strokeRect(o.x - w / 2, top - 22, w, 24);
   ctx.fillStyle = '#f4e9c8';
   ctx.fillText(text, o.x, top - 5);
 }
@@ -4478,10 +5687,10 @@ function drawDialog() {
   ctx.fillStyle = 'rgba(6, 14, 10, 0.45)';
   ctx.fillRect(0, 0, VIEW_W, VIEW_H);
 
-  const bx = 70;
-  const by = 404;
-  const bw = 820;
-  const bh = 162;
+  const bw = Math.min(820, VIEW_W - 80);
+  const bx = (VIEW_W - bw) / 2;
+  const by = 396;
+  const bh = 174;
   ctx.fillStyle = '#1c2c21';
   ctx.fillRect(bx, by, bw, bh);
   ctx.strokeStyle = '#f4e9c8';
@@ -4490,35 +5699,37 @@ function drawDialog() {
 
   // табличка с именем
   ctx.fillStyle = '#2f5a3c';
-  ctx.fillRect(bx + 24, by - 16, 250, 28);
+  ctx.fillRect(bx + 24, by - 16, 280, 28);
   ctx.strokeStyle = '#f4e9c8';
   ctx.lineWidth = 2;
-  ctx.strokeRect(bx + 25, by - 15, 248, 26);
+  ctx.strokeRect(bx + 25, by - 15, 278, 26);
   ctx.fillStyle = '#ffdf7a';
-  ctx.font = 'bold 15px "Courier New", monospace';
+  ctx.font = 'bold 17px "Courier New", monospace';
   ctx.textAlign = 'left';
-  ctx.fillText(dialog.name, bx + 38, by + 3);
+  ctx.fillText(dialog.name, bx + 38, by + 4);
 
   // портрет говорящего
   const tx = dialog.face ? bx + 150 : bx + 40;
   if (dialog.face && NPC_DEFS[dialog.face]) {
     const nd = NPC_DEFS[dialog.face];
-    shadow(bx + 78, by + 146, 24, 8);
-    drawCharacter(ctx, bx + 78, by + 146, 4, nd.def, nd.eye || '#2f6fd0', 'down', 0, true);
+    shadow(bx + 78, by + 156, 24, 8);
+    drawCharacter(ctx, bx + 78, by + 156, 4, nd.def, nd.eye || '#2f6fd0', 'down', 0, true);
   }
 
   ctx.fillStyle = '#f4e9c8';
-  ctx.font = '16px "Courier New", monospace';
-  wrapText(dialog.lines[dialog.i], tx, by + 48, bw - (tx - bx) - 30, 24);
+  ctx.font = (IS_TOUCH ? 20 : 19) + 'px "Courier New", monospace';
+  wrapText(dialog.lines[dialog.i], tx, by + 50, bw - (tx - bx) - 30, 27);
 
   ctx.fillStyle = '#7f9c86';
-  ctx.font = '12px "Courier New", monospace';
+  ctx.font = (IS_TOUCH ? 14 : 13) + 'px "Courier New", monospace';
   ctx.textAlign = 'right';
-  ctx.fillText(
-    'E — дальше  (' + (dialog.i + 1) + '/' + dialog.lines.length + ')',
-    bx + bw - 24,
-    by + bh - 14
-  );
+  const nextHint =
+    uiMode === 'touch'
+      ? 'нажми, чтобы продолжить'
+      : uiMode === 'gamepad'
+        ? 'A — дальше'
+        : 'E / пробел — дальше';
+  ctx.fillText(nextHint + '  (' + (dialog.i + 1) + '/' + dialog.lines.length + ')', bx + bw - 24, by + bh - 14);
   ctx.textAlign = 'left';
 }
 
@@ -4837,7 +6048,7 @@ function drawBossBar() {
   ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
   ctx.textAlign = 'left';
   ctx.fillStyle = boss.phase === 2 ? '#ff9a8a' : '#f4e9c8';
-  ctx.font = 'bold 13px "Courier New", monospace';
+  ctx.font = 'bold ' + (IS_TOUCH ? 15 : 13) + 'px "Courier New", monospace';
   ctx.fillText(def.name + (boss.phase === 2 ? ' · В ЯРОСТИ' : ''), x + 10, y + 17);
   drawBar(x + 10, y + 22, w - 20, 14, boss.hp, boss.maxHp, '#c0392b', '');
   ctx.textAlign = 'center';
@@ -4857,7 +6068,7 @@ function drawBar(x, y, w, h, value, max, color, label) {
   ctx.strokeRect(x + 1, y + 1, w - 2, h - 2);
 
   ctx.fillStyle = '#f4e9c8';
-  ctx.font = 'bold 11px "Courier New", monospace';
+  ctx.font = 'bold ' + (IS_TOUCH ? 14 : 11) + 'px "Courier New", monospace';
   ctx.textAlign = 'left';
   ctx.fillText(label, x + 6, y + h - 4);
   ctx.textAlign = 'right';
@@ -4875,10 +6086,10 @@ function drawHud() {
 
   drawCharacter(ctx, 36, 52, 2, CHARACTERS[selChar], EYE_COLORS[selEye].color, 'down', 0);
   ctx.fillStyle = '#f4e9c8';
-  ctx.font = 'bold 14px "Courier New", monospace';
+  ctx.font = 'bold ' + (IS_TOUCH ? 15 : 14) + 'px "Courier New", monospace';
   ctx.fillText(CHARACTERS[selChar].name, 58, 32);
   ctx.fillStyle = '#9dbfa4';
-  ctx.font = '12px "Courier New", monospace';
+  ctx.font = (IS_TOUCH ? 13 : 12) + 'px "Courier New", monospace';
   ctx.fillText('глаза: ' + EYE_COLORS[selEye].name, 58, 48);
 
   drawBar(22, 60, 240, 18, player.hp, MAX_HP, '#d24a44', 'ЗДОРОВЬЕ');
@@ -4896,12 +6107,20 @@ function drawHud() {
   if (hasBow()) {
     drawItemIcon(ctx, 'arrow', 18, 114, 26);
     ctx.fillStyle = invCount('arrow') ? (hasCrystalBow() ? '#e0bcff' : '#f4e9c8') : '#ff9a8a';
-    ctx.font = 'bold 14px "Courier New", monospace';
+    ctx.font = 'bold ' + (IS_TOUCH ? 16 : 14) + 'px "Courier New", monospace';
     ctx.fillText('стрелы: ' + invCount('arrow'), 48, 133);
   } else {
     ctx.fillStyle = '#9dbfa4';
     ctx.font = '12px "Courier New", monospace';
-    ctx.fillText('лука пока нет (C)', 20, 133);
+    ctx.fillText(
+      uiMode === 'touch'
+        ? 'лука нет — КРАФТ'
+        : uiMode === 'gamepad'
+          ? 'лука нет — LT'
+          : 'лука пока нет (C)',
+      20,
+      133
+    );
   }
 
   // алмазики — валюта для лавки одежды
@@ -4913,7 +6132,7 @@ function drawHud() {
   drawItemIcon(ctx, 'diamond', 17, 156, 22);
   ctx.textAlign = 'left';
   ctx.fillStyle = '#bff0ff';
-  ctx.font = 'bold 14px "Courier New", monospace';
+  ctx.font = 'bold ' + (IS_TOUCH ? 16 : 14) + 'px "Courier New", monospace';
   ctx.fillText(String(progress.diamonds), 46, 174);
 
   const warn = [];
@@ -4925,7 +6144,7 @@ function drawHud() {
   if (bats) warn.push('Летучие мыши: ' + bats + '!');
   if (player.poison > 0) warn.push('Яд! −1 HP каждую секунду');
   ctx.textAlign = 'center';
-  ctx.font = 'bold 15px "Courier New", monospace';
+  ctx.font = 'bold ' + (IS_TOUCH ? 17 : 15) + 'px "Courier New", monospace';
   if (Math.sin(performance.now() / 220) > -0.3) {
     warn.forEach((text, i) => {
       ctx.fillStyle = i === 0 && (starving || low) ? (starving ? '#ff9a8a' : '#ffd08a') : '#ff9a8a';
@@ -4936,17 +6155,32 @@ function drawHud() {
   drawClock();
   drawBossBar();
 
-  ctx.textAlign = 'right';
-  ctx.fillStyle = 'rgba(12, 26, 18, 0.6)';
-  ctx.fillRect(VIEW_W - 262, 68, 250, 88);
-  ctx.fillStyle = '#cfe3d2';
-  ctx.font = '12px "Courier New", monospace';
-  ctx.fillText('WASD / стрелки — ходить', VIEW_W - 22, 86);
-  ctx.fillText('E / пробел — собрать, войти, спать', VIEW_W - 22, 102);
-  ctx.fillText('мышка или F — стрелять из лука', VIEW_W - 22, 118);
-  ctx.fillText('C — крафт, 1–0 — предмет', VIEW_W - 22, 134);
-  ctx.fillText('Esc — сменить персонажа', VIEW_W - 22, 150);
-  ctx.textAlign = 'center';
+  // Подсказки по управлению. На телефоне вместо них — экранные кнопки.
+  if (uiMode !== 'touch') {
+    const hints =
+      uiMode === 'gamepad'
+        ? [
+            'Стик / крест — ходить',
+            'A — действие, X / RT — выстрел',
+            'Y — предмет, LB / RB — слот',
+            'LT — крафт, B — назад',
+            'Start / Back — меню и помощь',
+          ]
+        : [
+            'WASD / стрелки — ходить',
+            'E / пробел — действие',
+            'мышь / F — стрелять',
+            'C — крафт, 1–0 — предмет',
+            'H — помощь, Esc — меню',
+          ];
+    ctx.textAlign = 'right';
+    ctx.fillStyle = 'rgba(12, 26, 18, 0.6)';
+    ctx.fillRect(VIEW_W - 262, 68, 250, 96);
+    ctx.fillStyle = '#cfe3d2';
+    ctx.font = '12px "Courier New", monospace';
+    hints.forEach((text, i) => ctx.fillText(text, VIEW_W - 22, 86 + i * 16));
+    ctx.textAlign = 'center';
+  }
 }
 
 // Часы: номер дня, время суток и солнышко/луна.
@@ -4992,12 +6226,12 @@ function drawClock() {
 
   ctx.textAlign = 'left';
   ctx.fillStyle = '#f4e9c8';
-  ctx.font = 'bold 14px "Courier New", monospace';
+  ctx.font = 'bold ' + (IS_TOUCH ? 16 : 14) + 'px "Courier New", monospace';
   ctx.fillText('День ' + clock.day + ' — ' + phaseName(), x + 52, y + 22);
   if (world.kind === 'cave') {
     ctx.textAlign = 'right';
     ctx.fillStyle = '#cfa6f5';
-    ctx.font = 'bold 12px "Courier New", monospace';
+    ctx.font = 'bold ' + (IS_TOUCH ? 13 : 12) + 'px "Courier New", monospace';
     ctx.fillText('ПЕЩЕРА ' + world.level, x + 240, y + 22);
     ctx.textAlign = 'left';
   }
@@ -5014,8 +6248,8 @@ function drawClock() {
 
 /* ------------------------------ Инвентарь -------------------------------- */
 
-const INV = { size: 46, gap: 6 };
-INV.y = VIEW_H - INV.size - 14;
+const INV = { size: IS_TOUCH ? 52 : 46, gap: 6 };
+INV.y = VIEW_H - INV.size - (IS_TOUCH ? 8 : 14);
 INV.x0 = (VIEW_W - (INV.size * INV_SLOTS + INV.gap * (INV_SLOTS - 1))) / 2;
 
 function slotRect(i) {
@@ -5032,37 +6266,42 @@ function slotAt(x, y) {
 
 function drawInventory() {
   const hovered = slotAt(mouse.x, mouse.y);
+  const selected = uiMode === 'gamepad' ? selectedSlot : -1;
+  const iconSize = INV.size - 14;
   for (let i = 0; i < INV_SLOTS; i++) {
     const r = slotRect(i);
     const slot = inventory[i];
     ctx.fillStyle = 'rgba(12, 26, 18, 0.8)';
     ctx.fillRect(r.x, r.y, r.w, r.h);
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = i === hovered && slot ? '#f4e9c8' : '#4a6b52';
+    ctx.lineWidth = i === selected ? 3 : 2;
+    ctx.strokeStyle = i === selected ? '#ffd45c' : i === hovered && slot ? '#f4e9c8' : '#4a6b52';
     ctx.strokeRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2);
 
-    // номер клавиши в уголке
-    ctx.textAlign = 'left';
-    ctx.fillStyle = '#6f8f77';
-    ctx.font = '10px "Courier New", monospace';
-    ctx.fillText(String(i === 9 ? 0 : i + 1), r.x + 4, r.y + 12);
+    // номер клавиши в уголке (на телефоне он не нужен)
+    if (uiMode !== 'touch') {
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#6f8f77';
+      ctx.font = '10px "Courier New", monospace';
+      ctx.fillText(String(i === 9 ? 0 : i + 1), r.x + 4, r.y + 12);
+    }
 
     if (!slot) continue;
-    drawItemIcon(ctx, slot.id, r.x + 7, r.y + 7, 32);
+    drawItemIcon(ctx, slot.id, r.x + 7, r.y + 7, iconSize);
     if (slot.count > 1) {
       ctx.textAlign = 'right';
       ctx.fillStyle = '#1d3222';
-      ctx.font = 'bold 13px "Courier New", monospace';
+      ctx.font = 'bold ' + (IS_TOUCH ? 14 : 13) + 'px "Courier New", monospace';
       ctx.fillText(String(slot.count), r.x + r.w - 4, r.y + r.h - 3);
       ctx.fillStyle = '#f4e9c8';
       ctx.fillText(String(slot.count), r.x + r.w - 5, r.y + r.h - 4);
     }
   }
 
-  // подпись предмета под курсором
+  // подпись предмета под курсором/выбранного геймпадом слота
+  const shown = uiMode === 'gamepad' ? selected : hovered;
   ctx.textAlign = 'center';
-  if (hovered >= 0 && inventory[hovered]) {
-    const item = ITEMS[inventory[hovered].id];
+  if (shown >= 0 && inventory[shown]) {
+    const item = ITEMS[inventory[shown].id];
     const action = item.hunger
       ? ' (съесть)'
       : item.heal || item.poison
@@ -5070,13 +6309,20 @@ function drawInventory() {
         : item.place
           ? ' (поставить)'
           : '';
+    const hint = uiMode === 'gamepad' ? ' · Y — использовать' : '';
     ctx.fillStyle = '#f4e9c8';
-    ctx.font = '13px "Courier New", monospace';
-    ctx.fillText(item.name + action, VIEW_W / 2, INV.y - 10);
+    ctx.font = (IS_TOUCH ? 16 : 15) + 'px "Courier New", monospace';
+    ctx.fillText(item.name + action + hint, VIEW_W / 2, INV.y - 10);
   } else if (inventory.length === 0) {
     ctx.fillStyle = '#9dbfa4';
-    ctx.font = '12px "Courier New", monospace';
-    ctx.fillText('Инвентарь пуст — собирай палки, листья, уголь и еду (E)', VIEW_W / 2, INV.y - 10);
+    ctx.font = (IS_TOUCH ? 14 : 13) + 'px "Courier New", monospace';
+    ctx.fillText(
+      uiMode === 'touch'
+        ? 'Инвентарь пуст — собирай палки, листья и еду кнопкой «ДЕЙСТВИЕ»'
+        : 'Инвентарь пуст — собирай палки, листья, уголь и еду (E)',
+      VIEW_W / 2,
+      INV.y - 10
+    );
   }
 }
 
@@ -5085,6 +6331,8 @@ function drawInventory() {
 const CRAFT = { w: 470, h: 60 + RECIPES.length * 74 + 26 };
 CRAFT.x = (VIEW_W - CRAFT.w) / 2;
 CRAFT.y = 30;
+const CRAFT_CLOSE = { x: CRAFT.x + CRAFT.w - 50, y: CRAFT.y + 8, w: 38, h: 38 };
+let craftSel = 0;
 
 function recipeRect(i) {
   return { x: CRAFT.x + 16, y: CRAFT.y + 52 + i * 74, w: CRAFT.w - 32, h: 66 };
@@ -5092,8 +6340,17 @@ function recipeRect(i) {
 
 function updateCraftPanel() {
   if (!mouse.clicked) return;
+  mouse.clicked = false;
+  if (hit(CRAFT_CLOSE, mouse.x, mouse.y)) {
+    craftOpen = false;
+    return;
+  }
   for (let i = 0; i < RECIPES.length; i++) {
-    if (hit(recipeRect(i), mouse.x, mouse.y)) craft(RECIPES[i]);
+    if (hit(recipeRect(i), mouse.x, mouse.y)) {
+      craftSel = i;
+      craft(RECIPES[i]);
+      return;
+    }
   }
 }
 
@@ -5112,16 +6369,28 @@ function drawCraftPanel() {
   ctx.font = 'bold 22px "Courier New", monospace';
   ctx.fillText('КРАФТ', CRAFT.x + CRAFT.w / 2, CRAFT.y + 34);
 
+  // крестик закрытия — удобен мышкой и пальцем
+  const closeHover = hit(CRAFT_CLOSE, mouse.x, mouse.y);
+  ctx.fillStyle = closeHover ? '#6b3a3a' : '#2c4733';
+  ctx.fillRect(CRAFT_CLOSE.x, CRAFT_CLOSE.y, CRAFT_CLOSE.w, CRAFT_CLOSE.h);
+  ctx.strokeStyle = '#f4e9c8';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(CRAFT_CLOSE.x + 1, CRAFT_CLOSE.y + 1, CRAFT_CLOSE.w - 2, CRAFT_CLOSE.h - 2);
+  ctx.fillStyle = '#f4e9c8';
+  ctx.font = 'bold 24px "Courier New", monospace';
+  ctx.fillText('×', CRAFT_CLOSE.x + CRAFT_CLOSE.w / 2, CRAFT_CLOSE.y + 27);
+
   for (let i = 0; i < RECIPES.length; i++) {
     const rec = RECIPES[i];
     const r = recipeRect(i);
     const ok = canCraft(rec);
     const hovered = hit(r, mouse.x, mouse.y);
+    const focused = i === craftSel && uiMode !== 'touch';
 
     ctx.fillStyle = ok ? (hovered ? '#3b5f43' : '#2c4733') : '#25322a';
     ctx.fillRect(r.x, r.y, r.w, r.h);
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = ok ? '#7bbd63' : '#44554b';
+    ctx.lineWidth = focused ? 3 : 2;
+    ctx.strokeStyle = focused ? '#ffd45c' : ok ? '#7bbd63' : '#44554b';
     ctx.strokeRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2);
 
     // «ингредиент + ингредиент = предмет»
@@ -5131,9 +6400,9 @@ function drawCraftPanel() {
     const entries = Object.entries(rec.need);
     entries.forEach(([id, n], k) => {
       drawItemIcon(ctx, id, x, y, 32);
-      ctx.font = 'bold 12px "Courier New", monospace';
+      ctx.font = 'bold 13px "Courier New", monospace';
       ctx.fillStyle = invCount(id) >= n ? '#a6e07a' : '#ff9a8a';
-      ctx.fillText(invCount(id) + '/' + n, x + 16, y + 44);
+      ctx.fillText(invCount(id) + '/' + n, x + 16, y + 45);
       x += 42;
       if (k < entries.length - 1) {
         ctx.fillStyle = '#cfe3d2';
@@ -5150,22 +6419,29 @@ function drawCraftPanel() {
 
     ctx.textAlign = 'left';
     ctx.fillStyle = ok ? '#f4e9c8' : '#9dbfa4';
-    ctx.font = 'bold 15px "Courier New", monospace';
+    ctx.font = 'bold 16px "Courier New", monospace';
     ctx.fillText(ITEMS[rec.out].name, x + 44, y + 16);
     ctx.fillStyle = '#8fae96';
-    ctx.font = '12px "Courier New", monospace';
-    ctx.fillText(rec.note, x + 44, y + 34);
+    ctx.font = '13px "Courier New", monospace';
+    ctx.fillText(rec.note, x + 44, y + 35);
     if (ok) {
       const noRoom = invCount(rec.out) === 0 && inventory.length >= INV_SLOTS;
       ctx.fillStyle = noRoom ? '#ff9a8a' : '#a6e07a';
-      ctx.fillText(noRoom ? 'инвентарь полон — съешь или поставь что-нибудь' : 'нажми, чтобы скрафтить', x + 44, y + 50);
+      ctx.font = '13px "Courier New", monospace';
+      ctx.fillText(noRoom ? 'инвентарь полон — съешь или поставь что-нибудь' : 'нажми, чтобы скрафтить', x + 44, y + 52);
     }
   }
 
   ctx.textAlign = 'center';
   ctx.fillStyle = '#7f9c86';
-  ctx.font = '12px "Courier New", monospace';
-  ctx.fillText('C или Esc — закрыть', CRAFT.x + CRAFT.w / 2, CRAFT.y + CRAFT.h - 12);
+  ctx.font = '13px "Courier New", monospace';
+  ctx.fillText(craftFooter(), CRAFT.x + CRAFT.w / 2, CRAFT.y + CRAFT.h - 12);
+}
+
+function craftFooter() {
+  if (uiMode === 'touch') return 'Нажми рецепт · × — закрыть';
+  if (uiMode === 'gamepad') return 'Стик — выбор · A — скрафтить · B — закрыть';
+  return '↑ ↓ — выбор · Enter — скрафтить · C / Esc — закрыть';
 }
 
 /* ------------------------------ Лавка одежды ------------------------------ */
@@ -5175,6 +6451,8 @@ SHOP.x = (VIEW_W - SHOP.w) / 2;
 SHOP.y = (VIEW_H - SHOP.h) / 2;
 
 const SHOP_CARD = { w: 262, h: 108, gapX: 16, gapY: 12 };
+const SHOP_CLOSE = { x: SHOP.x + SHOP.w - 52, y: SHOP.y + 8, w: 38, h: 38 };
+let shopSel = 0;
 
 function shopCardRect(i) {
   const col = i % 2;
@@ -5190,8 +6468,13 @@ function shopCardRect(i) {
 function updateShop() {
   if (!mouse.clicked) return;
   mouse.clicked = false;
+  if (hit(SHOP_CLOSE, mouse.x, mouse.y)) {
+    shopOpen = false;
+    return;
+  }
   for (let i = 0; i < CLOTHES.length; i++) {
     if (hit(shopCardRect(i), mouse.x, mouse.y)) {
+      shopSel = i;
       shopClick(CLOTHES[i]);
       return;
     }
@@ -5220,14 +6503,25 @@ function drawShop() {
   ctx.textAlign = 'center';
   ctx.fillStyle = '#f4e9c8';
   ctx.font = 'bold 22px "Courier New", monospace';
-  ctx.fillText('ЛАВКА ОДЕЖДЫ', SHOP.x + 178, SHOP.y + 34);
+  ctx.fillText('ЛАВКА ОДЕЖДЫ', SHOP.x + SHOP.w / 2, SHOP.y + 34);
+
+  // крестик закрытия
+  const closeHover = hit(SHOP_CLOSE, mouse.x, mouse.y);
+  ctx.fillStyle = closeHover ? '#6b3a3a' : '#2c4733';
+  ctx.fillRect(SHOP_CLOSE.x, SHOP_CLOSE.y, SHOP_CLOSE.w, SHOP_CLOSE.h);
+  ctx.strokeStyle = '#f4e9c8';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(SHOP_CLOSE.x + 1, SHOP_CLOSE.y + 1, SHOP_CLOSE.w - 2, SHOP_CLOSE.h - 2);
+  ctx.fillStyle = '#f4e9c8';
+  ctx.font = 'bold 24px "Courier New", monospace';
+  ctx.fillText('×', SHOP_CLOSE.x + SHOP_CLOSE.w / 2, SHOP_CLOSE.y + 27);
 
   // сколько алмазиков в кармане
-  drawItemIcon(ctx, 'diamond', SHOP.x + SHOP.w - 92, SHOP.y + 14, 26);
+  drawItemIcon(ctx, 'diamond', SHOP.x + SHOP.w - 142, SHOP.y + 14, 26);
   ctx.textAlign = 'left';
   ctx.fillStyle = '#bff0ff';
   ctx.font = 'bold 17px "Courier New", monospace';
-  ctx.fillText(String(progress.diamonds), SHOP.x + SHOP.w - 60, SHOP.y + 35);
+  ctx.fillText(String(progress.diamonds), SHOP.x + SHOP.w - 110, SHOP.y + 35);
 
   for (let i = 0; i < CLOTHES.length; i++) {
     const item = CLOTHES[i];
@@ -5235,47 +6529,59 @@ function drawShop() {
     const owned = !!progress.owned[item.id];
     const worn = !!progress.worn[item.id];
     const hovered = hit(r, mouse.x, mouse.y);
+    const focused = i === shopSel && uiMode !== 'touch';
     const afford = progress.diamonds >= item.price;
 
     ctx.fillStyle = worn ? '#3b5f43' : owned ? '#2c4733' : hovered ? '#33443a' : '#25322a';
     ctx.fillRect(r.x, r.y, r.w, r.h);
-    ctx.lineWidth = worn ? 3 : 2;
-    ctx.strokeStyle = worn ? '#ffd45c' : owned ? '#7bbd63' : hovered ? '#f4e9c8' : '#44554b';
+    ctx.lineWidth = focused ? 3 : worn ? 3 : 2;
+    ctx.strokeStyle = focused
+      ? '#f4e9c8'
+      : worn
+        ? '#ffd45c'
+        : owned
+          ? '#7bbd63'
+          : hovered
+            ? '#f4e9c8'
+            : '#44554b';
     ctx.strokeRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2);
 
     drawItemIcon(ctx, item.id, r.x + 12, r.y + 22, 40);
 
     ctx.textAlign = 'left';
     ctx.fillStyle = '#f4e9c8';
-    ctx.font = 'bold 14px "Courier New", monospace';
+    ctx.font = 'bold 16px "Courier New", monospace';
     ctx.fillText(item.name, r.x + 64, r.y + 30);
     ctx.fillStyle = '#8fae96';
-    ctx.font = '11px "Courier New", monospace';
-    ctx.fillText(item.note, r.x + 64, r.y + 48);
+    ctx.font = '12px "Courier New", monospace';
+    ctx.fillText(item.note, r.x + 64, r.y + 49);
 
-    ctx.font = 'bold 13px "Courier New", monospace';
+    ctx.font = 'bold 14px "Courier New", monospace';
+    const tap = uiMode === 'keyboard' ? 'клик' : 'нажми';
     if (worn) {
       ctx.fillStyle = '#ffd45c';
-      ctx.fillText('надета · клик — снять', r.x + 64, r.y + 76);
+      ctx.fillText('надета · ' + tap + ' — снять', r.x + 64, r.y + 78);
     } else if (owned) {
       ctx.fillStyle = '#a6e07a';
-      ctx.fillText('в шкафу · клик — надеть', r.x + 64, r.y + 76);
+      ctx.fillText('в шкафу · ' + tap + ' — надеть', r.x + 64, r.y + 78);
     } else {
       ctx.fillStyle = afford ? '#bff0ff' : '#ff9a8a';
-      ctx.fillText(item.price + ' ♦ · ' + (afford ? 'купить' : 'не хватает'), r.x + 64, r.y + 76);
+      ctx.fillText(item.price + ' ♦ · ' + (afford ? 'купить' : 'не хватает'), r.x + 64, r.y + 78);
     }
     if (!owned) drawItemIcon(ctx, 'diamond', r.x + r.w - 38, r.y + 12, 22);
   }
 
   ctx.textAlign = 'center';
   ctx.fillStyle = '#7f9c86';
-  ctx.font = '12px "Courier New", monospace';
-  ctx.fillText(
-    'Алмазики дают за победу над боссами · Esc — выйти',
-    SHOP.x + SHOP.w / 2,
-    SHOP.y + SHOP.h - 14
-  );
+  ctx.font = '13px "Courier New", monospace';
+  ctx.fillText(shopFooter(), SHOP.x + SHOP.w / 2, SHOP.y + SHOP.h - 14);
   ctx.textAlign = 'left';
+}
+
+function shopFooter() {
+  if (uiMode === 'touch') return 'Нажми вещь · × — выйти · алмазики дают за боссов';
+  if (uiMode === 'gamepad') return 'Стик — выбор · A — купить/надеть · B — выйти';
+  return 'Алмазики — за боссов · Enter — купить · Esc — выйти';
 }
 
 // Экран поражения: от голода или от зубов врагов.
@@ -5300,26 +6606,49 @@ function drawFaint() {
     VIEW_H / 2 + 22
   );
 
-  ctx.fillStyle = '#5d9a4c';
-  ctx.fillRect(RETRY_BTN.x, RETRY_BTN.y, RETRY_BTN.w, RETRY_BTN.h);
-  ctx.lineWidth = 3;
-  ctx.strokeStyle = '#f4e9c8';
-  ctx.strokeRect(RETRY_BTN.x + 1.5, RETRY_BTN.y + 1.5, RETRY_BTN.w - 3, RETRY_BTN.h - 3);
-  ctx.fillStyle = '#12240f';
-  ctx.font = 'bold 20px "Courier New", monospace';
-  ctx.fillText('НАЧАТЬ ЗАНОВО', RETRY_BTN.x + RETRY_BTN.w / 2, RETRY_BTN.y + 34);
+  const button = (r, label, main) => {
+    ctx.fillStyle = main
+      ? hit(r, mouse.x, mouse.y)
+        ? '#7bbd63'
+        : '#5d9a4c'
+      : hit(r, mouse.x, mouse.y)
+        ? '#3b5f43'
+        : '#2c4733';
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#f4e9c8';
+    ctx.strokeRect(r.x + 1.5, r.y + 1.5, r.w - 3, r.h - 3);
+    ctx.fillStyle = main ? '#12240f' : '#f4e9c8';
+    ctx.font = 'bold 18px "Courier New", monospace';
+    ctx.fillText(label, r.x + r.w / 2, r.y + 33);
+  };
+  button(RETRY_BTN, 'НАЧАТЬ ЗАНОВО', true);
+  button(CHANGE_BTN, 'СМЕНИТЬ ГЕРОЯ', false);
 
   ctx.fillStyle = '#7f9c86';
-  ctx.font = '13px "Courier New", monospace';
-  ctx.fillText('Enter — заново, Esc — выбрать другого персонажа', VIEW_W / 2, RETRY_BTN.y + 84);
+  ctx.font = (IS_TOUCH ? 15 : 13) + 'px "Courier New", monospace';
+  ctx.fillText(
+    uiMode === 'touch'
+      ? 'Можно начать заново или выбрать другого героя'
+      : uiMode === 'gamepad'
+        ? 'A — заново · B — выбрать другого героя'
+        : 'Enter — заново · Esc — выбрать другого персонажа',
+    VIEW_W / 2,
+    RETRY_BTN.y + 84
+  );
 }
 
-const RETRY_BTN = { x: VIEW_W / 2 - 130, y: VIEW_H / 2 + 50, w: 260, h: 50 };
+const RETRY_BTN = { x: VIEW_W / 2 - 248, y: VIEW_H / 2 + 50, w: 240, h: 50 };
+const CHANGE_BTN = { x: VIEW_W / 2 + 8, y: VIEW_H / 2 + 50, w: 240, h: 50 };
 
 function updateFaint() {
   if (!mouse.clicked) return;
   mouse.clicked = false;
   if (hit(RETRY_BTN, mouse.x, mouse.y)) startGame();
+  else if (hit(CHANGE_BTN, mouse.x, mouse.y)) {
+    state = 'select';
+    mouse.clicked = false;
+  }
 }
 
 /* ----------------------- Финал первой части (город) ----------------------- */
@@ -5392,8 +6721,16 @@ function drawWin() {
   btn(FIN_RESTART, 'СЫГРАТЬ СНОВА', false);
 
   ctx.fillStyle = '#7f9c86';
-  ctx.font = '12px "Courier New", monospace';
-  ctx.fillText('Enter — вернуться в город · R — заново · Esc — выбрать персонажа', VIEW_W / 2, 534);
+  ctx.font = (IS_TOUCH ? 15 : 13) + 'px "Courier New", monospace';
+  ctx.fillText(
+    uiMode === 'touch'
+      ? 'Нажми кнопку — можно вернуться в город или сыграть заново'
+      : uiMode === 'gamepad'
+        ? 'A — вернуться в город · X — сыграть заново · B — выбрать героя'
+        : 'Enter — вернуться в город · R — заново · Esc — выбрать персонажа',
+    VIEW_W / 2,
+    534
+  );
 }
 
 function backToCity() {
@@ -5629,8 +6966,16 @@ function drawVictory() {
   ctx.fillText('ДАЛЬШЕ', VICT_BTN.x + VICT_BTN.w / 2, VICT_BTN.y + 32);
 
   ctx.fillStyle = '#7f9c86';
-  ctx.font = '12px "Courier New", monospace';
-  ctx.fillText('Enter — дальше · алмазики тратятся в лавке одежды', VIEW_W / 2, 508);
+  ctx.font = (IS_TOUCH ? 15 : 13) + 'px "Courier New", monospace';
+  ctx.fillText(
+    uiMode === 'touch'
+      ? 'Алмазики тратятся в лавке одежды. Нажми «ДАЛЬШЕ»'
+      : uiMode === 'gamepad'
+        ? 'A — дальше · алмазики тратятся в лавке одежды'
+        : 'Enter — дальше · алмазики тратятся в лавке одежды',
+    VIEW_W / 2,
+    508
+  );
 }
 
 function updateVictory(dt) {
@@ -5647,14 +6992,194 @@ function closeVictory() {
   mouse.clicked = false;
 }
 
+/* --------------------------- Меню паузы ---------------------------------- */
+
+const MENU_PANEL = { x: VIEW_W / 2 - 230, y: 84, w: 460, h: 468 };
+const MENU_ITEM = { x: VIEW_W / 2 - 180, y: 158, w: 360, h: 58, gap: 8 };
+
+function menuItemRect(i) {
+  return {
+    x: MENU_ITEM.x,
+    y: MENU_ITEM.y + i * (MENU_ITEM.h + MENU_ITEM.gap),
+    w: MENU_ITEM.w,
+    h: MENU_ITEM.h,
+  };
+}
+
+function fullscreenSupported() {
+  try {
+    const el = document.documentElement;
+    return !!(el && (el.requestFullscreen || el.webkitRequestFullscreen));
+  } catch (e) {
+    return false;
+  }
+}
+
+function isFullscreen() {
+  try {
+    return !!(document.fullscreenElement || document.webkitFullscreenElement);
+  } catch (e) {
+    return false;
+  }
+}
+
+function toggleFullscreen() {
+  try {
+    const el = document.documentElement;
+    if (isFullscreen()) {
+      const exit = document.exitFullscreen || document.webkitExitFullscreen;
+      if (exit) exit.call(document);
+      return;
+    }
+    const request = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (!request) {
+      showToast('Полный экран не поддерживается браузером', '#ffd08a');
+      return;
+    }
+    const result = request.call(el);
+    if (result && result.catch) {
+      result.catch(() => showToast('Не удалось включить полный экран', '#ffd08a'));
+    }
+  } catch (e) {
+    showToast('Не удалось включить полный экран', '#ffd08a');
+  }
+}
+
+function menuItems() {
+  const items = [
+    { id: 'resume', label: 'ПРОДОЛЖИТЬ' },
+    { id: 'help', label: 'КАК ИГРАТЬ' },
+  ];
+  if (fullscreenSupported()) {
+    items.push({ id: 'fullscreen', label: isFullscreen() ? 'ОБЫЧНЫЙ ЭКРАН' : 'ВО ВЕСЬ ЭКРАН' });
+  }
+  items.push({ id: 'restart', label: 'НАЧАТЬ ЗАНОВО' });
+  items.push({ id: 'select', label: 'СМЕНИТЬ ГЕРОЯ' });
+  return items;
+}
+
+function menuActivate(id) {
+  if (id === 'resume') closeMenu();
+  else if (id === 'help') openHelp();
+  else if (id === 'fullscreen') toggleFullscreen();
+  else if (id === 'restart') {
+    closeMenu();
+    startGame();
+  } else if (id === 'select') {
+    closeMenu();
+    craftOpen = false;
+    shopOpen = false;
+    dialog = null;
+    sleep.active = false;
+    state = 'select';
+    mouse.clicked = false;
+  }
+}
+
+function updateMenu() {
+  if (!mouse.clicked) return;
+  mouse.clicked = false;
+  const items = menuItems();
+  for (let i = 0; i < items.length; i++) {
+    if (hit(menuItemRect(i), mouse.x, mouse.y)) {
+      menuSel = i;
+      menuActivate(items[i].id);
+      return;
+    }
+  }
+  const p = MENU_PANEL;
+  if (mouse.x < p.x || mouse.x > p.x + p.w || mouse.y < p.y || mouse.y > p.y + p.h) {
+    closeMenu();
+  }
+}
+
+function drawMenu() {
+  ctx.fillStyle = 'rgba(6, 14, 10, 0.72)';
+  ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+
+  const p = MENU_PANEL;
+  ctx.fillStyle = '#1c2c21';
+  ctx.fillRect(p.x, p.y, p.w, p.h);
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = '#f4e9c8';
+  ctx.strokeRect(p.x + 1.5, p.y + 1.5, p.w - 3, p.h - 3);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffdf7a';
+  ctx.font = 'bold 30px "Courier New", monospace';
+  ctx.fillText('ПАУЗА', VIEW_W / 2, p.y + 44);
+  ctx.fillStyle = '#9dbfa4';
+  ctx.font = (IS_TOUCH ? 16 : 14) + 'px "Courier New", monospace';
+  ctx.fillText('Игра остановлена — лес подождёт', VIEW_W / 2, p.y + 68);
+
+  const items = menuItems();
+  menuSel = clamp(menuSel, 0, items.length - 1);
+  for (let i = 0; i < items.length; i++) {
+    const r = menuItemRect(i);
+    const hovered = hit(r, mouse.x, mouse.y);
+    const focused = i === menuSel && uiMode !== 'touch';
+    ctx.fillStyle = focused || hovered ? '#3b5f43' : '#2c4733';
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+    ctx.lineWidth = focused ? 3 : 2;
+    ctx.strokeStyle = focused ? '#ffd45c' : hovered ? '#f4e9c8' : '#4a6b52';
+    ctx.strokeRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2);
+    ctx.fillStyle = '#f4e9c8';
+    ctx.font = 'bold 19px "Courier New", monospace';
+    ctx.fillText(items[i].label, r.x + r.w / 2, r.y + 37);
+  }
+
+  ctx.fillStyle = '#7f9c86';
+  ctx.font = (IS_TOUCH ? 15 : 13) + 'px "Courier New", monospace';
+  const hint =
+    uiMode === 'touch'
+      ? 'Нажми пункт меню · кнопки вернутся в игру'
+      : uiMode === 'gamepad'
+        ? 'Стик — выбор · A — открыть · Start / B — продолжить'
+        : 'Стрелки — выбор · Enter — открыть · Esc — продолжить';
+  ctx.fillText(hint, VIEW_W / 2, p.y + p.h - 18);
+  ctx.textAlign = 'left';
+}
+
 /* ------------------------------- Цикл ------------------------------------ */
+
+function drawCurrentScreen() {
+  if (state === 'intro') drawIntro();
+  else if (state === 'select') drawSelect();
+  else if (state === 'faint') drawFaint();
+  else if (state === 'win') drawWin();
+  else if (state === 'victory') drawVictory();
+  else drawPlay();
+}
 
 let last = performance.now();
 function loop(now) {
   const dt = Math.min((now - last) / 1000, 0.05);
   last = now;
+  updateToast(dt);
 
-  if (state === 'select') {
+  // На телефоне в вертикальном положении показываем подсказку «поверни» и
+  // останавливаем игру, чтобы герой не погиб, пока игрок читает.
+  if (isPortraitTouch()) {
+    drawCurrentScreen();
+    drawToast();
+    requestAnimationFrame(loop);
+    return;
+  }
+
+  pollGamepad(dt);
+  updateTouchUi(dt);
+
+  if (helpOpen) {
+    updateHelp();
+    drawHelpScreen();
+  } else if (menuOpen) {
+    updateMenu();
+    drawPlay();
+    drawMenu();
+  } else if (state === 'intro') {
+    updateIntro(dt);
+    drawIntro();
+  } else if (state === 'select') {
     updateSelect(dt);
     drawSelect();
   } else if (state === 'faint') {
@@ -5670,6 +7195,7 @@ function loop(now) {
     updatePlay(dt);
     drawPlay();
   }
+  drawToast();
   requestAnimationFrame(loop);
 }
 
